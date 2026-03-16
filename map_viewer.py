@@ -133,6 +133,8 @@ def load_map(map_name, mode, manifest):
     out = {}
     for mk, mv in raw.items():
         if not isinstance(mv, dict): continue
+        if mk.endswith("_Arena"):
+            continue
         if mk in layout:
             col,row,span = layout[mk]
         else:
@@ -158,7 +160,7 @@ def load_map(map_name, mode, manifest):
             "col":col,"row":row,"span":span,
             "label":localized.get(mk, mv.get("Module_LocalizedString",mk) or mk),
             "bbox":bbox,"items":items,
-            "has_png":(MODULES/map_name/f"{mk}.png").exists(),
+            "has_png":_is_png_file(MODULES/map_name/f"{mk}.png"),
         }
     return out
 
@@ -504,6 +506,7 @@ class App(tk.Tk):
         if idx<len(self._mk_order):
             self.focus_key=self._mk_order[idx]
             self._draw_focus()
+            self.after(50, self._draw_focus)
             self._centre(self.focus_key)
 
     # ── Filters ───────────────────────────────────────────

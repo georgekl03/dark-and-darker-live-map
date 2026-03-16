@@ -90,7 +90,7 @@ select:focus{border-color:var(--accent)}
 #mc{position:absolute;top:0;left:0;transform-origin:0 0}
 
 /* Tiles */
-.tw{position:absolute}
+.tw{position:absolute;cursor:pointer}
 .ti{position:absolute;top:0;left:0;width:100%;height:100%;
     display:block;opacity:.9;image-rendering:auto}
 .tp{position:absolute;top:0;left:0;width:100%;height:100%;
@@ -99,7 +99,7 @@ select:focus{border-color:var(--accent)}
 .tp span{font-size:9px;color:#333345;text-align:center;padding:6px;
          word-break:break-all;line-height:1.4}
 .tl{position:absolute;bottom:0;left:0;right:0;font-size:9px;
-    color:rgba(255,255,255,.65);text-align:center;pointer-events:none;
+    color:var(--lbl-color,rgba(255,255,255,.65));text-align:center;pointer-events:none;
     text-shadow:0 0 3px #000,0 0 3px #000;padding:2px 3px;
     background:linear-gradient(transparent,rgba(0,0,0,.65))}
 .ov{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
@@ -135,13 +135,74 @@ select:focus{border-color:var(--accent)}
 #nd p{font-size:12px;max-width:300px;line-height:1.6}
 code{background:var(--panel2);padding:1px 5px;border-radius:3px;
      font-size:11px;color:var(--accent)}
+/* Module list */
+#mod-list{display:flex;flex-direction:column;gap:1px;max-height:140px;overflow-y:auto;margin-bottom:4px}
+.ml-item{padding:4px 6px;font-size:11px;border-radius:4px;cursor:pointer;
+          color:var(--text);transition:background .1s;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
+.ml-item:hover{background:#ffffff0a;color:var(--accent)}
+
+/* Settings panel */
+#sb{position:relative}
+#sp{position:absolute;inset:0;background:var(--panel);z-index:20;
+    display:none;flex-direction:column;overflow-y:auto;
+    padding:10px 10px 16px;border-top:1px solid var(--border)}
+#sp-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+#sp-hd span{font-size:12px;font-weight:700;color:var(--accent)}
+#sp-cls{background:none;border:none;color:var(--dim);cursor:pointer;font-size:18px;padding:0 4px;line-height:1}
+#sp-cls:hover{color:var(--text)}
+.sp-row{display:flex;flex-direction:column;gap:4px;padding:4px 2px}
+.sp-row label{font-size:11px;color:var(--text)}
+#sld-ms{width:100%;accent-color:var(--accent)}
+#btn-gear{background:none;border:none;color:var(--dim);cursor:pointer;
+          font-size:16px;padding:2px 4px;border-radius:4px;margin-left:auto;flex-shrink:0}
+#btn-gear:hover{color:var(--accent)}
+
+/* Focus modal */
+#fm{position:fixed;inset:0;z-index:500;display:none;
+    align-items:center;justify-content:center;background:#0009}
+#fm-box{background:var(--panel);border:1px solid var(--border2);
+        border-radius:8px;max-width:min(90vw,800px);max-height:90vh;
+        display:flex;flex-direction:column;overflow:hidden;min-width:320px}
+#fm-hd{display:flex;align-items:center;padding:10px 14px;
+       border-bottom:1px solid var(--border);background:var(--panel2);gap:8px}
+#fm-title{font-weight:700;color:var(--accent);flex:1;font-size:13px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#fm-cls{background:none;border:none;color:var(--dim);cursor:pointer;
+        font-size:18px;padding:0 4px;line-height:1}
+#fm-cls:hover{color:var(--text)}
+#fm-body{flex:1;overflow:hidden;display:flex;align-items:center;
+         justify-content:center;min-height:280px;background:var(--bg)}
+#fm-info{padding:6px 14px;font-size:10px;color:var(--dim);
+         border-top:1px solid var(--border);background:var(--panel2)}
+.fm-tw{position:relative;flex-shrink:0}
+.fm-tw img{display:block;width:100%;height:100%}
+.fm-tw .ov{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 </style>
 </head>
 <body>
 <div id="sb">
-  <div id="sb-hd">
-    <h1>⚔&nbsp; D&amp;D Map Viewer</h1>
-    <p>darkanddarkertracker.com  •  local data</p>
+  <div id="sb-hd" style="display:flex;align-items:center;gap:4px">
+    <div style="flex:1">
+      <h1>⚔&nbsp; D&amp;D Map Viewer</h1>
+      <p>darkanddarkertracker.com  •  local data</p>
+    </div>
+    <button id="btn-gear" title="Settings">⚙</button>
+  </div>
+  <div id="sp">
+    <div id="sp-hd">
+      <span>Settings</span>
+      <button id="sp-cls">✕</button>
+    </div>
+    <div class="lbl" style="padding-top:4px">Marker Scale</div>
+    <div class="sp-row">
+      <label>Size: <span id="sld-ms-val">1.0</span>×</label>
+      <input type="range" id="sld-ms" min="0.5" max="3" step="0.1" value="1">
+    </div>
+    <div class="lbl" style="margin-top:8px">Focus View</div>
+    <label class="ck"><input type="checkbox" id="cb-mk-focus" checked><span>Markers in focus view</span></label>
+    <div class="lbl" style="margin-top:8px">Label Style</div>
+    <label class="ck"><input type="checkbox" id="cb-lbl-dark"><span>Dark text labels</span></label>
   </div>
   <div id="sb-bd">
     <div class="lbl">Map</div>
@@ -156,6 +217,9 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;
     <div class="lbl" style="margin-top:10px">Display</div>
     <label class="ck"><input type="checkbox" id="cb-lbl" checked><span>Module names</span></label>
     <label class="ck" style="margin-top:2px"><input type="checkbox" id="cb-mk" checked><span>Loot markers</span></label>
+
+    <div class="lbl" style="margin-top:10px">Modules</div>
+    <div id="mod-list"></div>
 
     <div class="lbl" style="margin-top:10px">Loot Filters</div>
     <button id="btn-tall">Toggle All On / Off</button>
@@ -175,6 +239,17 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;
   <div id="zlbl">100%</div>
 </div>
 <div id="tt"></div>
+<div id="fm">
+  <div id="fm-bg"></div>
+  <div id="fm-box">
+    <div id="fm-hd">
+      <span id="fm-title">Module</span>
+      <button id="fm-cls">✕</button>
+    </div>
+    <div id="fm-body"></div>
+    <div id="fm-info"></div>
+  </div>
+</div>
 <script src="/viewer.js"></script>
 </body>
 </html>

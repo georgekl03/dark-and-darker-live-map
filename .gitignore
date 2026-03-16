@@ -6,3 +6,4 @@ data/modules/
 data/icons/
 data/loot/
 data/settings.json
+*.png.bad

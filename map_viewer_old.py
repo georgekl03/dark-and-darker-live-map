@@ -68,6 +68,17 @@ def get_layout(map_name: str, manifest: dict) -> dict:
     return auto_layout(manifest.get(map_name, {}).get("moduleKeys", []))
 
 
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+def _is_valid_png(path: Path) -> bool:
+    """Return True only if *path* starts with the 8-byte PNG signature."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(8) == PNG_SIG
+    except Exception:
+        return False
+
+
 # ── Data API ──────────────────────────────────────────────
 def load_manifest() -> dict:
     p = DATA / "map_manifest.json"
@@ -106,6 +117,9 @@ def api_map_data(map_name: str, mode: str = "N") -> dict:
 
     for mod_key, mod_val in raw.items():
         if not isinstance(mod_val, dict):
+            continue
+
+        if mod_key.endswith("_Arena"):
             continue
 
         if mod_key in layout:
@@ -151,7 +165,7 @@ def api_map_data(map_name: str, mode: str = "N") -> dict:
             "row":     row,
             "span":    span,
             "label":   localized.get(mod_key, mod_val.get("Module_LocalizedString", mod_key)),
-            "has_png": (MODULES / map_name / f"{mod_key}.png").exists(),
+            "has_png": _is_valid_png(MODULES / map_name / f"{mod_key}.png"),
             "bbox":    bbox,
             "items":   items,
         }
@@ -178,7 +192,10 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.strip("/").split("/")
                 if len(parts) == 3:
                     img = MODULES / parts[1] / parts[2]
-                    self._binary(img, "image/png") if img.exists() else self.send_error(404)
+                    if img.exists() and _is_valid_png(img):
+                        self._binary(img, "image/png")
+                    else:
+                        self.send_error(404)
                 else:
                     self.send_error(404)
             elif path == "/api/maps":
@@ -336,7 +353,7 @@ select:focus{border-color:var(--accent)}
 #mc{position:absolute;top:0;left:0;transform-origin:0 0}
 
 /* Tiles */
-.tw{position:absolute}
+.tw{position:absolute;cursor:pointer}
 .ti{position:absolute;top:0;left:0;width:100%;height:100%;
     display:block;opacity:.9;image-rendering:auto}
 .tp{position:absolute;top:0;left:0;width:100%;height:100%;
@@ -345,7 +362,7 @@ select:focus{border-color:var(--accent)}
 .tp span{font-size:9px;color:#333345;text-align:center;padding:6px;
          word-break:break-all;line-height:1.4}
 .tl{position:absolute;bottom:0;left:0;right:0;font-size:9px;
-    color:rgba(255,255,255,.65);text-align:center;pointer-events:none;
+    color:var(--lbl-color,rgba(255,255,255,.65));text-align:center;pointer-events:none;
     text-shadow:0 0 3px #000,0 0 3px #000;padding:2px 3px;
     background:linear-gradient(transparent,rgba(0,0,0,.65))}
 .ov{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
@@ -381,13 +398,75 @@ select:focus{border-color:var(--accent)}
 #nd p{font-size:12px;max-width:300px;line-height:1.6}
 code{background:var(--panel2);padding:1px 5px;border-radius:3px;
      font-size:11px;color:var(--accent)}
+
+/* Module list */
+#mod-list{display:flex;flex-direction:column;gap:1px;max-height:140px;overflow-y:auto;margin-bottom:4px}
+.ml-item{padding:4px 6px;font-size:11px;border-radius:4px;cursor:pointer;
+          color:var(--text);transition:background .1s;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
+.ml-item:hover{background:#ffffff0a;color:var(--accent)}
+
+/* Settings panel */
+#sb{position:relative}
+#sp{position:absolute;inset:0;background:var(--panel);z-index:20;
+    display:none;flex-direction:column;overflow-y:auto;
+    padding:10px 10px 16px;border-top:1px solid var(--border)}
+#sp-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+#sp-hd span{font-size:12px;font-weight:700;color:var(--accent)}
+#sp-cls{background:none;border:none;color:var(--dim);cursor:pointer;font-size:18px;padding:0 4px;line-height:1}
+#sp-cls:hover{color:var(--text)}
+.sp-row{display:flex;flex-direction:column;gap:4px;padding:4px 2px}
+.sp-row label{font-size:11px;color:var(--text)}
+#sld-ms{width:100%;accent-color:var(--accent)}
+#btn-gear{background:none;border:none;color:var(--dim);cursor:pointer;
+          font-size:16px;padding:2px 4px;border-radius:4px;margin-left:auto;flex-shrink:0}
+#btn-gear:hover{color:var(--accent)}
+
+/* Focus modal */
+#fm{position:fixed;inset:0;z-index:500;display:none;
+    align-items:center;justify-content:center;background:#0009}
+#fm-box{background:var(--panel);border:1px solid var(--border2);
+        border-radius:8px;max-width:min(90vw,800px);max-height:90vh;
+        display:flex;flex-direction:column;overflow:hidden;min-width:320px}
+#fm-hd{display:flex;align-items:center;padding:10px 14px;
+       border-bottom:1px solid var(--border);background:var(--panel2);gap:8px}
+#fm-title{font-weight:700;color:var(--accent);flex:1;font-size:13px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#fm-cls{background:none;border:none;color:var(--dim);cursor:pointer;
+        font-size:18px;padding:0 4px;line-height:1}
+#fm-cls:hover{color:var(--text)}
+#fm-body{flex:1;overflow:hidden;display:flex;align-items:center;
+         justify-content:center;min-height:280px;background:var(--bg)}
+#fm-info{padding:6px 14px;font-size:10px;color:var(--dim);
+         border-top:1px solid var(--border);background:var(--panel2)}
+.fm-tw{position:relative;flex-shrink:0}
+.fm-tw img{display:block;width:100%;height:100%}
+.fm-tw .ov{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 </style>
 </head>
 <body>
 <div id="sb">
-  <div id="sb-hd">
-    <h1>⚔&nbsp; D&amp;D Map Viewer</h1>
-    <p>darkanddarkertracker.com  •  local data</p>
+  <div id="sb-hd" style="display:flex;align-items:center;gap:4px">
+    <div style="flex:1">
+      <h1>⚔&nbsp; D&amp;D Map Viewer</h1>
+      <p>darkanddarkertracker.com  •  local data</p>
+    </div>
+    <button id="btn-gear" title="Settings">⚙</button>
+  </div>
+  <div id="sp">
+    <div id="sp-hd">
+      <span>Settings</span>
+      <button id="sp-cls">✕</button>
+    </div>
+    <div class="lbl" style="padding-top:4px">Marker Scale</div>
+    <div class="sp-row">
+      <label>Size: <span id="sld-ms-val">1.0</span>×</label>
+      <input type="range" id="sld-ms" min="0.5" max="3" step="0.1" value="1">
+    </div>
+    <div class="lbl" style="margin-top:8px">Focus View</div>
+    <label class="ck"><input type="checkbox" id="cb-mk-focus" checked><span>Markers in focus view</span></label>
+    <div class="lbl" style="margin-top:8px">Label Style</div>
+    <label class="ck"><input type="checkbox" id="cb-lbl-dark"><span>Dark text labels</span></label>
   </div>
   <div id="sb-bd">
     <div class="lbl">Map</div>
@@ -402,6 +481,9 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;
     <div class="lbl" style="margin-top:10px">Display</div>
     <label class="ck"><input type="checkbox" id="cb-lbl" checked><span>Module names</span></label>
     <label class="ck" style="margin-top:2px"><input type="checkbox" id="cb-mk" checked><span>Loot markers</span></label>
+
+    <div class="lbl" style="margin-top:10px">Modules</div>
+    <div id="mod-list"></div>
 
     <div class="lbl" style="margin-top:10px">Loot Filters</div>
     <button id="btn-tall">Toggle All On / Off</button>
@@ -421,6 +503,17 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;
   <div id="zlbl">100%</div>
 </div>
 <div id="tt"></div>
+<div id="fm">
+  <div id="fm-bg"></div>
+  <div id="fm-box">
+    <div id="fm-hd">
+      <span id="fm-title">Module</span>
+      <button id="fm-cls">✕</button>
+    </div>
+    <div id="fm-body"></div>
+    <div id="fm-info"></div>
+  </div>
+</div>
 <script src="/viewer.js"></script>
 </body>
 </html>
@@ -450,17 +543,20 @@ const CATS = {
   gate:            {label:'Gate',            color:'#C09850', group:'Interact',  r:4, ring:false, pri:3},
   lever:           {label:'Lever',           color:'#D0A060', group:'Interact',  r:3, ring:false, pri:3},
   door:            {label:'Door',            color:'#A07050', group:'Interact',  r:3, ring:false, pri:2},
+  monster:         {label:'Monster Spawn',   color:'#884422', group:'Monsters',  r:4, ring:false, pri:1},
 };
-const GROUPS = ['Chests','Exits','Bosses','Resources','Shrines','Loot','Hazards','Interact'];
+const GROUPS = ['Chests','Exits','Bosses','Resources','Shrines','Loot','Hazards','Interact','Monsters'];
 
 const S = {
   map:null, mode:'N', modules:{},
-  visible: new Set(Object.keys(CATS)),
+  visible: new Set(Object.keys(CATS).filter(k=>CATS[k].group!=='Monsters')),
   showLbls:true, showMks:true,
+  focusMarkers:true, markerScale:1.0, focusKey:null,
   zoom:1, panX:0, panY:0,
   drag:false, dx:0, dy:0, px:0, py:0,
 };
 const TILE = 200;
+let _dragMoved = false;
 
 const vp   = id('vp'), mc = id('mc'), tt = id('tt');
 const sbar = id('sbar'), msel = id('msel'), nd = id('nd'), zlbl = id('zlbl');
@@ -506,7 +602,7 @@ async function loadMap(name){
   catch(e){ setS('Error: '+e.message); return; }
   if(data.error){ setS('Error: '+data.error); nd.style.display='block'; return; }
   S.modules=data.modules;
-  render(); fit(); refreshCounts();
+  render(); fit(); refreshCounts(); populateModList();
   setS(`${name}  •  ${Object.keys(S.modules).length} modules  •  ${S.mode==='N'?'Normal':'High Roller'}`);
 }
 
@@ -545,14 +641,18 @@ function render(){
       wrap.appendChild(l);
     }
 
-    if(S.showMks) wrap.appendChild(mkOverlay(mod,W,H,key));
+    if(S.showMks) wrap.appendChild(mkOverlay(mod,W,H,key,S.markerScale));
+    wrap.addEventListener('click',e=>{
+      if(e.target.closest('.mk')||_dragMoved) return;
+      openFocus(key);
+    });
     mc.appendChild(wrap);
   }
   applyX();
 }
 
 const NS='http://www.w3.org/2000/svg';
-function mkOverlay(mod,W,H,key){
+function mkOverlay(mod,W,H,key,scale=1.0){
   const svg=document.createElementNS(NS,'svg');
   svg.setAttribute('width',W); svg.setAttribute('height',H);
   svg.setAttribute('overflow','visible'); svg.classList.add('ov');
@@ -564,7 +664,7 @@ function mkOverlay(mod,W,H,key){
     if(!cfg||!S.visible.has(item.cat)) continue;
     const px=((item.x-bb.xmin)/xr)*W;
     const py=((bb.ymax-item.y)/yr)*H;   // flip Y
-    const r=cfg.r;
+    const r=cfg.r*scale;
 
     const g=document.createElementNS(NS,'g');
     g.classList.add('mk');
@@ -572,15 +672,15 @@ function mkOverlay(mod,W,H,key){
 
     if(cfg.ring){
       const ring=document.createElementNS(NS,'circle');
-      ring.setAttribute('r',r+4); ring.setAttribute('fill','none');
-      ring.setAttribute('stroke',cfg.color); ring.setAttribute('stroke-width','1.2');
+      ring.setAttribute('r',(r+4*scale).toFixed(1)); ring.setAttribute('fill','none');
+      ring.setAttribute('stroke',cfg.color); ring.setAttribute('stroke-width',(1.2*scale).toFixed(1));
       ring.setAttribute('stroke-opacity','0.4');
       g.appendChild(ring);
     }
     const c=document.createElementNS(NS,'circle');
-    c.setAttribute('r',r); c.setAttribute('fill',cfg.color);
+    c.setAttribute('r',r.toFixed(1)); c.setAttribute('fill',cfg.color);
     c.setAttribute('fill-opacity','0.92');
-    c.setAttribute('stroke','#000'); c.setAttribute('stroke-width','1');
+    c.setAttribute('stroke','#000'); c.setAttribute('stroke-width',Math.max(0.5,scale).toFixed(1));
     g.appendChild(c);
 
     g.addEventListener('mouseenter', e=>showTT(e,item,cfg));
@@ -647,9 +747,61 @@ function rebuildOvs(){
     const mod=S.modules[key];
     const W=mod.span*TILE, H=mod.span*TILE;
     const old=wrap.querySelector('.ov');
-    const svg=mkOverlay(mod,W,H,key);
+    const svg=mkOverlay(mod,W,H,key,S.markerScale);
     if(old) wrap.replaceChild(svg,old); else wrap.appendChild(svg);
   });
+}
+
+function populateModList(){
+  const ml=id('mod-list'); if(!ml) return;
+  ml.innerHTML='';
+  for(const [key,mod] of Object.entries(S.modules)){
+    const d=document.createElement('div'); d.className='ml-item';
+    d.textContent=mod.label||key; d.title=key;
+    d.addEventListener('click',()=>openFocus(key));
+    ml.appendChild(d);
+  }
+}
+
+function openFocus(key){
+  const mod=S.modules[key]; if(!mod) return;
+  S.focusKey=key;
+  id('fm-title').textContent=mod.label||key;
+  const span=mod.span||1;
+  const FW=Math.min(500*span,580), FH=FW;
+  const tw=document.createElement('div');
+  tw.className='fm-tw';
+  tw.style.width=FW+'px'; tw.style.height=FH+'px';
+  if(mod.has_png){
+    const img=document.createElement('img');
+    img.src=`/tile/${encodeURIComponent(S.map)}/${encodeURIComponent(key)}.png`;
+    img.style.cssText='position:absolute;inset:0;width:100%;height:100%';
+    img.draggable=false;
+    tw.appendChild(img);
+  } else {
+    const ph=document.createElement('div');
+    ph.className='tp'; ph.style.cssText='position:absolute;inset:0';
+    ph.innerHTML=`<span>${esc(mod.label||key)}</span>`;
+    tw.appendChild(ph);
+  }
+  if(S.focusMarkers){
+    const sc=S.markerScale*2.0;
+    const svg=mkOverlay(mod,FW,FH,key,sc);
+    svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none';
+    tw.appendChild(svg);
+  }
+  const body=id('fm-body'); body.innerHTML=''; body.appendChild(tw);
+  const vis=(mod.items||[]).filter(i=>S.visible.has(i.cat)).length;
+  const tot=(mod.items||[]).length;
+  id('fm-info').textContent=`${key}  •  ${vis} markers shown  (${tot} total items)`;
+  id('fm').style.display='flex';
+}
+
+function closeFocus(){ id('fm').style.display='none'; S.focusKey=null; }
+
+function toggleSettings(){
+  const sp=id('sp');
+  sp.style.display=sp.style.display==='flex'?'none':'flex';
 }
 
 function applyX(){
@@ -682,6 +834,20 @@ function bindAll(){
   });
   id('cb-lbl').addEventListener('change',e=>{ S.showLbls=e.target.checked; render(); });
   id('cb-mk') .addEventListener('change',e=>{ S.showMks =e.target.checked; render(); });
+  id('btn-gear').addEventListener('click', toggleSettings);
+  id('sp-cls').addEventListener('click',()=>{ id('sp').style.display='none'; });
+  id('sld-ms').addEventListener('input',e=>{
+    S.markerScale=parseFloat(e.target.value);
+    id('sld-ms-val').textContent=S.markerScale.toFixed(1);
+    render();
+  });
+  id('cb-mk-focus').addEventListener('change',e=>{ S.focusMarkers=e.target.checked; });
+  id('cb-lbl-dark').addEventListener('change',e=>{
+    document.documentElement.style.setProperty('--lbl-color', e.target.checked?'rgba(0,0,0,.85)':'rgba(255,255,255,.65)');
+    render();
+  });
+  id('fm-cls').addEventListener('click', closeFocus);
+  id('fm-bg').addEventListener('click', closeFocus);
   id('btn-tall').addEventListener('click',()=>{
     const allOn=Object.keys(CATS).every(c=>S.visible.has(c));
     allOn?S.visible.clear():Object.keys(CATS).forEach(c=>S.visible.add(c));
@@ -691,6 +857,7 @@ function bindAll(){
   id('bzo').addEventListener('click',()=>zoomAt(0.80,vp.clientWidth/2,vp.clientHeight/2));
   id('bft').addEventListener('click',fit);
   document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){ closeFocus(); return; }
     if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName)) return;
     if(e.key==='+'||e.key==='=') zoomAt(1.2, vp.clientWidth/2, vp.clientHeight/2);
     if(e.key==='-')              zoomAt(0.83,vp.clientWidth/2, vp.clientHeight/2);
@@ -703,18 +870,20 @@ function bindAll(){
   },{passive:false});
   vp.addEventListener('mousedown',e=>{
     if(e.target.closest('.mk')) return;
+    _dragMoved=false;
     S.drag=true; S.dx=e.clientX; S.dy=e.clientY; S.px=S.panX; S.py=S.panY;
     vp.classList.add('gb');
   });
   window.addEventListener('mousemove',e=>{
     if(!S.drag) return;
+    if(Math.abs(e.clientX-S.dx)+Math.abs(e.clientY-S.dy)>5) _dragMoved=true;
     S.panX=S.px+(e.clientX-S.dx); S.panY=S.py+(e.clientY-S.dy); applyX();
   });
   window.addEventListener('mouseup',()=>{ S.drag=false; vp.classList.remove('gb'); });
   let ltd=0,ltc=null;
   vp.addEventListener('touchstart',e=>{
     if(e.touches.length===1){ S.drag=true; S.dx=e.touches[0].clientX; S.dy=e.touches[0].clientY; S.px=S.panX; S.py=S.panY; }
-    if(e.touches.length===2){ const a=e.touches[0],b=e.touches[1]; ltd=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY); ltc={(x:(a.clientX+b.clientX)/2,y:(a.clientY+b.clientY)/2)}; }
+    if(e.touches.length===2){ const a=e.touches[0],b=e.touches[1]; ltd=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY); ltc={x:(a.clientX+b.clientX)/2,y:(a.clientY+b.clientY)/2}; }
   },{passive:true});
   vp.addEventListener('touchmove',e=>{
     if(e.touches.length===1&&S.drag){ S.panX=S.px+(e.touches[0].clientX-S.dx); S.panY=S.py+(e.touches[0].clientY-S.dy); applyX(); }
