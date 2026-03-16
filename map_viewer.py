@@ -164,6 +164,16 @@ def load_map(map_name, mode, manifest):
 # ── Image helpers ─────────────────────────────────────────
 _img_cache = {}
 
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+def _is_png_file(path: Path) -> bool:
+    """Return True only if *path* starts with the 8-byte PNG signature."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(8) == PNG_SIG
+    except Exception:
+        return False
+
 def hex_rgb(h):
     h=h.lstrip("#")
     return (int(h[0:2],16),int(h[2:4],16),int(h[4:6],16))
@@ -172,9 +182,25 @@ def get_tile_img(map_name, mod_key, px):
     k=f"{map_name}/{mod_key}/{px}"
     if k in _img_cache: return _img_cache[k]
     p = MODULES/map_name/f"{mod_key}.png"
+    img = None
     if p.exists():
-        img=Image.open(p).convert("RGBA").resize((px,px),Image.LANCZOS)
-    else:
+        try:
+            # Strategy: signature check → force decode → quarantine on failure → placeholder
+            if not _is_png_file(p):
+                raise ValueError("Invalid PNG signature.")
+            im = Image.open(p)
+            im.load()  # force full decode so errors surface here
+            img = im.convert("RGBA").resize((px,px),Image.LANCZOS)
+        except Exception:
+            # Quarantine the bad file so we don't keep re-trying it
+            try:
+                bad = p.with_suffix(p.suffix + ".bad")
+                if not bad.exists():
+                    p.rename(bad)
+            except Exception:
+                pass
+            img = None
+    if img is None:
         img=Image.new("RGBA",(px,px),(19,19,32,255))
         d=ImageDraw.Draw(img)
         d.rectangle([0,0,px-1,px-1],outline=(44,43,54),width=1)
@@ -245,13 +271,9 @@ class App(tk.Tk):
         self._cur_map  = ""
         self._build()
         self._populate_maps()
-        last=self.cfg.get("last_map","")
-        if last and (RAW/f"{last}.json").exists():
-            self.map_var.set(last)
-        elif self._map_names:
-            first=next((n for n in self._map_names if (RAW/f"{n}.json").exists()),self._map_names[0])
-            self.map_var.set(first)
-        self.after(100,self._reload_map)
+        # Do not auto-load a map on startup — wait for the user to select one.
+        self.map_var.set("")
+        self.status.set("Select a map to load.")
 
     # ── Build UI ──────────────────────────────────────────
     def _build(self):
@@ -444,15 +466,12 @@ class App(tk.Tk):
     # ── Data ──────────────────────────────────────────────
     def _populate_maps(self):
         self._map_names=list(self.manifest.keys())
-        vals=[]
-        for n in self._map_names:
-            ok=(RAW/f"{n}.json").exists()
-            vals.append(f"{'✓' if ok else '✗'}  {n}")
-        self.map_combo["values"]=vals
+        # Show plain map names — no ✓/✗ prefix
+        self.map_combo["values"]=self._map_names
 
     def _cur_map_name(self):
         val=self.map_var.get().strip()
-        return val.lstrip("✓✗ ").strip() if val else None
+        return val if val else None
 
     def _reload_map(self):
         name=self._cur_map_name()
