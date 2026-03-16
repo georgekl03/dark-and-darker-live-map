@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+data/raw/
+data/modules/
+data/icons/
+data/loot/
+data/settings.json
