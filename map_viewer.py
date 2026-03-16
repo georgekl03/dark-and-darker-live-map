@@ -96,6 +96,10 @@ def get_layout(name, manifest):
         return KNOWN_LAYOUTS[name]
     return auto_layout(manifest.get(name,{}).get("moduleKeys",[]))
 
+# Delay (ms) before re-rendering the focus canvas to allow Tkinter to report
+# the canvas's real pixel dimensions on the very first selection.
+FOCUS_RENDER_DELAY_MS = 50
+
 # ── Settings ──────────────────────────────────────────────
 SETTINGS_PATH = DATA / "settings.json"
 DEFAULTS = {
@@ -506,7 +510,7 @@ class App(tk.Tk):
         if idx<len(self._mk_order):
             self.focus_key=self._mk_order[idx]
             self._draw_focus()
-            self.after(50, self._draw_focus)
+            self.after(FOCUS_RENDER_DELAY_MS, self._draw_focus)
             self._centre(self.focus_key)
 
     # ── Filters ───────────────────────────────────────────

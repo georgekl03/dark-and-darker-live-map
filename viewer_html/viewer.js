@@ -1,8 +1,10 @@
 
 'use strict';
 
-const LBL_COLOR_LIGHT = 'rgba(255,255,255,.65)';
-const LBL_COLOR_DARK  = 'rgba(0,0,0,.85)';
+const LBL_COLOR_LIGHT           = 'rgba(255,255,255,.65)';
+const LBL_COLOR_DARK            = 'rgba(0,0,0,.85)';
+const DRAG_THRESHOLD            = 5;   // px movement before a mousedown becomes a drag
+const FOCUS_MARKER_SCALE_MULT   = 2.0; // focus modal markers are scaled up relative to the map
 
 const CATS = {
   chest_legendary: {label:'Legendary Chest', color:'#FFD700', group:'Chests',    r:7, ring:true,  pri:10},
@@ -266,7 +268,7 @@ function openFocus(key){
     tw.appendChild(ph);
   }
   if(S.focusMarkers){
-    const sc=S.markerScale*2.0;
+    const sc=S.markerScale*FOCUS_MARKER_SCALE_MULT;
     const svg=mkOverlay(mod,FW,FH,key,sc);
     svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none';
     tw.appendChild(svg);
@@ -357,7 +359,7 @@ function bindAll(){
   });
   window.addEventListener('mousemove',e=>{
     if(!S.drag) return;
-    if(Math.abs(e.clientX-S.dx)+Math.abs(e.clientY-S.dy)>5) _dragMoved=true;
+    if(Math.abs(e.clientX-S.dx)+Math.abs(e.clientY-S.dy)>DRAG_THRESHOLD) _dragMoved=true;
     S.panX=S.px+(e.clientX-S.dx); S.panY=S.py+(e.clientY-S.dy); applyX();
   });
   window.addEventListener('mouseup',()=>{ S.drag=false; vp.classList.remove('gb'); });
