@@ -3,7 +3,6 @@
         "mapDataPath": "/ProcessedModules/Cave/Cave.json",
         "moduleKeys": [
             "CaveMaze",
-            "CaveMaze_Center_02",
             "CaveTown",
             "CaveTown_02",
             "Cave_Altar_02",
@@ -39,7 +38,6 @@
         ],
         "moduleLocalizedStrings": {
             "CaveMaze": "Goblin Maze A",
-            "CaveMaze_Center_02": "Goblin Maze B",
             "CaveTown": "Goblin Town A",
             "CaveTown_02": "Goblin Town B",
             "Cave_Altar_02": "Cave Altar B",
@@ -93,7 +91,6 @@
             "Crypt_AltarRoomAB",
             "Crypt_Atrium",
             "Crypt_Atrium_Arena",
-            "Crypt_BlindfallPit",
             "Crypt_Chapel",
             "Crypt_Chapel_Arena",
             "Crypt_DarkRitualRoom_01",
@@ -105,12 +102,8 @@
             "Crypt_GreatWalkway_Arena",
             "Crypt_LargeRoomPit",
             "Crypt_LargeRoomPit_Arena",
-            "Crypt_LightlessChamber_01",
-            "Crypt_LightlessTomb_01",
-            "Crypt_MadCorridors",
             "Crypt_Ramparts",
             "Crypt_Ramparts_Arena",
-            "Crypt_TorchboundVault",
             "Crypt_Vault",
             "Crypt_Vault_Arena",
             "DarkMagicLibrary_Center",
@@ -174,18 +167,13 @@
             "CrossRoad": "Cross Road",
             "Crypt_AltarRoomAB": "Altar Room",
             "Crypt_Atrium": "Atrium",
-            "Crypt_BlindfallPit": "Blindfall Pit",
             "Crypt_Chapel": "Chapel",
             "Crypt_DarkRitualRoom_01": "Ritual Room",
             "Crypt_Dungeon": "Crypt Dungeons",
             "Crypt_FourRooms": "Four Rooms",
             "Crypt_GreatWalkway": "The Great Walkway",
             "Crypt_LargeRoomPit": "Broken Bridge",
-            "Crypt_LightlessChamber_01": "Lightless Chamber",
-            "Crypt_LightlessTomb_01": "Lightless Tomb",
-            "Crypt_MadCorridors": "Mad Corridors",
             "Crypt_Ramparts": "Ramparts",
-            "Crypt_TorchboundVault": "Torchbound Vault",
             "Crypt_Vault": "Vault",
             "DarkMagicLibrary_Center": "Dark Magic Library",
             "DeathHall": "Death Hall",
@@ -215,34 +203,6 @@
             "Tomb_Center": "Tombs",
             "TreasureRoom_01": "Treasure Room",
             "UndergroundAltar": "Underground Altar"
-        }
-    },
-    "Firedeep": {
-        "mapDataPath": "/ProcessedModules/Firedeep/Firedeep.json",
-        "is_predetermined": true,
-        "moduleKeys": [
-            "Firedeep_AnvilOutpost",
-            "Firedeep_BlazeTunnel",
-            "Firedeep_BrokenStonebridge",
-            "Firedeep_BurningCourt",
-            "Firedeep_CollapsedDigSite",
-            "Firedeep_Greatforge",
-            "Firedeep_LavaCrossway",
-            "Firedeep_MagmaFalls",
-            "Firedeep_MiningPassage",
-            "Firedeep_MoltenPit"
-        ],
-        "moduleLocalizedStrings": {
-            "Firedeep_AnvilOutpost": "Anvil Outpost",
-            "Firedeep_BlazeTunnel": "Blaze Tunnel",
-            "Firedeep_BrokenStonebridge": "Broken Stone Bridge",
-            "Firedeep_BurningCourt": "Burning Court",
-            "Firedeep_CollapsedDigSite": "Collapsed Dig Site",
-            "Firedeep_Greatforge": "Greatforge",
-            "Firedeep_LavaCrossway": "Lava Crossway",
-            "Firedeep_MagmaFalls": "Magma Falls",
-            "Firedeep_MiningPassage": "Mining Passage",
-            "Firedeep_MoltenPit": "Molten Pit"
         }
     },
     "IceAbyss": {
@@ -305,7 +265,6 @@
     "IceCave": {
         "mapDataPath": "/ProcessedModules/IceCave/IceCave.json",
         "moduleKeys": [
-            "IceCave_Altar",
             "IceCave_Barricade",
             "IceCave_Bridge",
             "IceCave_Bridge_Arena",
@@ -339,13 +298,11 @@
             "IceCave_Quarry_Arena",
             "IceCave_Sanctum",
             "IceCave_Spiral",
-            "IceCave_Turnnel_01",
             "IceCave_Watchtower",
             "IceCave_Watchtower_Arena",
             "IceCave_WolfCave"
         ],
         "moduleLocalizedStrings": {
-            "IceCave_Altar": "Altar",
             "IceCave_Barricade": "Barricade",
             "IceCave_Bridge": "Bridge",
             "IceCave_CavePathway": "Cave Pathway",
@@ -368,7 +325,6 @@
             "IceCave_Quarry": "Quarry",
             "IceCave_Sanctum": "Sanctum",
             "IceCave_Spiral": "Spiral",
-            "IceCave_Turnnel_01": "Tunnel",
             "IceCave_Watchtower": "Watchtower",
             "IceCave_WolfCave": "Wolf Cave"
         }
