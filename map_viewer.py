@@ -128,7 +128,8 @@ def load_map(map_name, mode, manifest):
     data_key  = f"{mode}_Data"
     raw       = json.loads(rp.read_text())
     used = set((v[0],v[1]) for v in layout.values())
-    oc = 0; ory = -2
+    max_row = max((v[1] for v in layout.values()), default=-1) if layout else -1
+    oc = 0; ory = max_row + 1
     out = {}
     for mk, mv in raw.items():
         if not isinstance(mv, dict): continue
@@ -137,7 +138,7 @@ def load_map(map_name, mode, manifest):
         else:
             while (oc,ory) in used:
                 oc += 1
-                if oc > 12: oc=0; ory-=1
+                if oc > 12: oc=0; ory+=1
             col,row,span = oc,ory,1
             used.add((oc,ory)); oc+=1
         items_raw = mv.get(data_key) or mv.get("N_Data",[])

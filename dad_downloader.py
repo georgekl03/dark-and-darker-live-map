@@ -503,10 +503,9 @@ def purify_module_pngs(manifest: dict, redownload: bool = False, force_redownloa
                 continue
             map_folder = MODULES / map_name
             map_folder.mkdir(parents=True, exist_ok=True)
-            png_base = map_info.get("modulePngBasePath", "")
             redownloaded = 0
             for mod_key in mod_keys:
-                url = f"{BASE_URL}{png_base}{mod_key}.png"
+                url = get_module_png_url(map_name, mod_key)
                 dest = map_folder / f"{mod_key}.png"
                 if download_file(url, dest, force=force_redownload):
                     # Verify the freshly downloaded file
