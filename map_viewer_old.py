@@ -523,6 +523,9 @@ code{background:var(--panel2);padding:1px 5px;border-radius:3px;
 VIEWER_JS = r"""
 'use strict';
 
+const LBL_COLOR_LIGHT = 'rgba(255,255,255,.65)';
+const LBL_COLOR_DARK  = 'rgba(0,0,0,.85)';
+
 const CATS = {
   chest_legendary: {label:'Legendary Chest', color:'#FFD700', group:'Chests',    r:7, ring:true,  pri:10},
   chest_hoard:     {label:'Hoard Chest',     color:'#FF8C00', group:'Chests',    r:7, ring:true,  pri:9},
@@ -843,7 +846,7 @@ function bindAll(){
   });
   id('cb-mk-focus').addEventListener('change',e=>{ S.focusMarkers=e.target.checked; });
   id('cb-lbl-dark').addEventListener('change',e=>{
-    document.documentElement.style.setProperty('--lbl-color', e.target.checked?'rgba(0,0,0,.85)':'rgba(255,255,255,.65)');
+    document.documentElement.style.setProperty('--lbl-color', e.target.checked?LBL_COLOR_DARK:LBL_COLOR_LIGHT);
     render();
   });
   id('fm-cls').addEventListener('click', closeFocus);
