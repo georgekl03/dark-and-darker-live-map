@@ -447,6 +447,86 @@ def clear_cache(what: str = "all"):
             info(f"{folder} did not exist")
 
 # ─────────────────────────────────────────────────────────
+# PNG purification
+# ─────────────────────────────────────────────────────────
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+def _is_valid_png(path: Path) -> bool:
+    """Return True only if *path* starts with the 8-byte PNG signature."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(8) == PNG_SIG
+    except Exception:
+        return False
+
+
+def purify_module_pngs(manifest: dict, redownload: bool = False, force_redownload: bool = False) -> dict:
+    """
+    Walk data/modules/**/*.png, check the PNG signature, and quarantine any
+    file that is not a valid PNG (e.g. an HTML error page saved as .png).
+
+    Quarantined files are renamed to *.png.bad.
+
+    Returns a summary dict with counts.
+    """
+    results = {"scanned": 0, "ok": 0, "quarantined": 0, "errors": 0}
+
+    all_pngs = list(MODULES.glob("**/*.png")) if MODULES.exists() else []
+    results["scanned"] = len(all_pngs)
+
+    quarantined_by_map: dict[str, list[str]] = {}
+
+    for p in all_pngs:
+        if not _is_valid_png(p):
+            map_name = p.parent.name
+            mod_key = p.stem
+            try:
+                bad = p.with_suffix(p.suffix + ".bad")
+                if bad.exists():
+                    bad.unlink()
+                p.rename(bad)
+                results["quarantined"] += 1
+                quarantined_by_map.setdefault(map_name, []).append(mod_key)
+                warn(f"Quarantined: {p.relative_to(ROOT)}")
+            except Exception as ex:
+                err(f"Could not quarantine {p}: {ex}")
+                results["errors"] += 1
+        else:
+            results["ok"] += 1
+
+    if redownload and quarantined_by_map:
+        info("Re-downloading quarantined module PNGs…")
+        for map_name, mod_keys in quarantined_by_map.items():
+            map_info = manifest.get(map_name)
+            if not map_info:
+                warn(f"  {map_name} not found in manifest — skipping re-download.")
+                continue
+            map_folder = MODULES / map_name
+            map_folder.mkdir(parents=True, exist_ok=True)
+            png_base = map_info.get("modulePngBasePath", "")
+            redownloaded = 0
+            for mod_key in mod_keys:
+                url = f"{BASE_URL}{png_base}{mod_key}.png"
+                dest = map_folder / f"{mod_key}.png"
+                if download_file(url, dest, force=force_redownload):
+                    # Verify the freshly downloaded file
+                    if _is_valid_png(dest):
+                        redownloaded += 1
+                    else:
+                        # Still corrupt — quarantine again
+                        try:
+                            bad2 = dest.with_suffix(dest.suffix + ".bad")
+                            if bad2.exists():
+                                bad2.unlink()
+                            dest.rename(bad2)
+                        except Exception:
+                            pass
+            ok(f"  {map_name}: re-downloaded {redownloaded}/{len(mod_keys)} PNGs")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────
 # Menus
 # ─────────────────────────────────────────────────────────
 def menu_download_maps(manifest: dict):
@@ -543,9 +623,43 @@ def menu_clear():
     pause()
 
 
-# ─────────────────────────────────────────────────────────
-# Main entry
-# ─────────────────────────────────────────────────────────
+def menu_purify_pngs(manifest: dict):
+    """Scan all downloaded module PNGs, quarantine corrupt ones, optionally re-download."""
+    print()
+    divider("Purify Module PNGs")
+    if not MODULES.exists() or not any(MODULES.glob("**/*.png")):
+        warn("No module PNGs found. Download map data first.")
+        pause()
+        return
+
+    total = sum(1 for _ in MODULES.glob("**/*.png"))
+    info(f"Found {total} PNG file(s) across all maps.")
+    print()
+    confirm = prompt("Scan and quarantine corrupt PNGs? (y/n)", "y").lower()
+    if confirm != "y":
+        warn("Cancelled.")
+        pause()
+        return
+
+    do_redownload = prompt("Re-download quarantined PNGs immediately? (y/n)", "n").lower() == "y"
+
+    print()
+    divider("Scanning…")
+    results = purify_module_pngs(manifest, redownload=do_redownload)
+    print()
+    divider("Summary")
+    info(f"Scanned   : {results['scanned']}")
+    ok(  f"Valid     : {results['ok']}")
+    if results["quarantined"]:
+        warn(f"Quarantined: {results['quarantined']}  (renamed to *.png.bad)")
+    else:
+        ok(  f"Quarantined: 0  — all files are valid PNGs")
+    if results["errors"]:
+        err( f"Errors    : {results['errors']}")
+    pause()
+
+
+
 def main():
     # Setup directories
     for d in (DATA, RAW, MODULES, ICONS, LOOT):
@@ -584,6 +698,7 @@ def main():
             "Download loot & icon assets",
             "Refresh manifest from server",
             "Inspect downloaded data",
+            "Purify module PNGs  (remove corrupt / HTML files)",
             "Clear cache",
             c("Exit", "red"),
         ]
@@ -601,8 +716,10 @@ def main():
         elif choice == 4:
             menu_inspect(manifest)
         elif choice == 5:
-            menu_clear()
+            menu_purify_pngs(manifest)
         elif choice == 6:
+            menu_clear()
+        elif choice == 7:
             print()
             ok("Goodbye!")
             print()
