@@ -1,6 +1,11 @@
 
 'use strict';
 
+const LBL_COLOR_LIGHT           = 'rgba(255,255,255,.65)';
+const LBL_COLOR_DARK            = 'rgba(0,0,0,.85)';
+const DRAG_THRESHOLD            = 5;   // px movement before a mousedown becomes a drag
+const FOCUS_MARKER_SCALE_MULT   = 2.0; // focus modal markers are scaled up relative to the map
+
 const CATS = {
   chest_legendary: {label:'Legendary Chest', color:'#FFD700', group:'Chests',    r:7, ring:true,  pri:10},
   chest_hoard:     {label:'Hoard Chest',     color:'#FF8C00', group:'Chests',    r:7, ring:true,  pri:9},
@@ -21,17 +26,20 @@ const CATS = {
   gate:            {label:'Gate',            color:'#C09850', group:'Interact',  r:4, ring:false, pri:3},
   lever:           {label:'Lever',           color:'#D0A060', group:'Interact',  r:3, ring:false, pri:3},
   door:            {label:'Door',            color:'#A07050', group:'Interact',  r:3, ring:false, pri:2},
+  monster:         {label:'Monster Spawn',   color:'#884422', group:'Monsters',  r:4, ring:false, pri:1},
 };
-const GROUPS = ['Chests','Exits','Bosses','Resources','Shrines','Loot','Hazards','Interact'];
+const GROUPS = ['Chests','Exits','Bosses','Resources','Shrines','Loot','Hazards','Interact','Monsters'];
 
 const S = {
   map:null, mode:'N', modules:{},
-  visible: new Set(Object.keys(CATS)),
+  visible: new Set(Object.keys(CATS).filter(k=>CATS[k].group!=='Monsters')),
   showLbls:true, showMks:true,
+  focusMarkers:true, markerScale:1.0, focusKey:null,
   zoom:1, panX:0, panY:0,
   drag:false, dx:0, dy:0, px:0, py:0,
 };
 const TILE = 200;
+let _dragMoved = false;
 
 const vp   = id('vp'), mc = id('mc'), tt = id('tt');
 const sbar = id('sbar'), msel = id('msel'), nd = id('nd'), zlbl = id('zlbl');
@@ -77,7 +85,7 @@ async function loadMap(name){
   catch(e){ setS('Error: '+e.message); return; }
   if(data.error){ setS('Error: '+data.error); nd.style.display='block'; return; }
   S.modules=data.modules;
-  render(); fit(); refreshCounts();
+  render(); fit(); refreshCounts(); populateModList();
   setS(`${name}  •  ${Object.keys(S.modules).length} modules  •  ${S.mode==='N'?'Normal':'High Roller'}`);
 }
 
@@ -116,14 +124,18 @@ function render(){
       wrap.appendChild(l);
     }
 
-    if(S.showMks) wrap.appendChild(mkOverlay(mod,W,H,key));
+    if(S.showMks) wrap.appendChild(mkOverlay(mod,W,H,key,S.markerScale));
+    wrap.addEventListener('click',e=>{
+      if(e.target.closest('.mk')||_dragMoved) return;
+      openFocus(key);
+    });
     mc.appendChild(wrap);
   }
   applyX();
 }
 
 const NS='http://www.w3.org/2000/svg';
-function mkOverlay(mod,W,H,key){
+function mkOverlay(mod,W,H,key,scale=1.0){
   const svg=document.createElementNS(NS,'svg');
   svg.setAttribute('width',W); svg.setAttribute('height',H);
   svg.setAttribute('overflow','visible'); svg.classList.add('ov');
@@ -135,7 +147,7 @@ function mkOverlay(mod,W,H,key){
     if(!cfg||!S.visible.has(item.cat)) continue;
     const px=((item.x-bb.xmin)/xr)*W;
     const py=((bb.ymax-item.y)/yr)*H;   // flip Y
-    const r=cfg.r;
+    const r=cfg.r*scale;
 
     const g=document.createElementNS(NS,'g');
     g.classList.add('mk');
@@ -143,15 +155,15 @@ function mkOverlay(mod,W,H,key){
 
     if(cfg.ring){
       const ring=document.createElementNS(NS,'circle');
-      ring.setAttribute('r',r+4); ring.setAttribute('fill','none');
-      ring.setAttribute('stroke',cfg.color); ring.setAttribute('stroke-width','1.2');
+      ring.setAttribute('r',(r+4*scale).toFixed(1)); ring.setAttribute('fill','none');
+      ring.setAttribute('stroke',cfg.color); ring.setAttribute('stroke-width',(1.2*scale).toFixed(1));
       ring.setAttribute('stroke-opacity','0.4');
       g.appendChild(ring);
     }
     const c=document.createElementNS(NS,'circle');
-    c.setAttribute('r',r); c.setAttribute('fill',cfg.color);
+    c.setAttribute('r',r.toFixed(1)); c.setAttribute('fill',cfg.color);
     c.setAttribute('fill-opacity','0.92');
-    c.setAttribute('stroke','#000'); c.setAttribute('stroke-width','1');
+    c.setAttribute('stroke','#000'); c.setAttribute('stroke-width',Math.max(0.5,scale).toFixed(1));
     g.appendChild(c);
 
     g.addEventListener('mouseenter', e=>showTT(e,item,cfg));
@@ -218,9 +230,61 @@ function rebuildOvs(){
     const mod=S.modules[key];
     const W=mod.span*TILE, H=mod.span*TILE;
     const old=wrap.querySelector('.ov');
-    const svg=mkOverlay(mod,W,H,key);
+    const svg=mkOverlay(mod,W,H,key,S.markerScale);
     if(old) wrap.replaceChild(svg,old); else wrap.appendChild(svg);
   });
+}
+
+function populateModList(){
+  const ml=id('mod-list'); if(!ml) return;
+  ml.innerHTML='';
+  for(const [key,mod] of Object.entries(S.modules)){
+    const d=document.createElement('div'); d.className='ml-item';
+    d.textContent=mod.label||key; d.title=key;
+    d.addEventListener('click',()=>openFocus(key));
+    ml.appendChild(d);
+  }
+}
+
+function openFocus(key){
+  const mod=S.modules[key]; if(!mod) return;
+  S.focusKey=key;
+  id('fm-title').textContent=mod.label||key;
+  const span=mod.span||1;
+  const FW=Math.min(500*span,580), FH=FW;
+  const tw=document.createElement('div');
+  tw.className='fm-tw';
+  tw.style.width=FW+'px'; tw.style.height=FH+'px';
+  if(mod.has_png){
+    const img=document.createElement('img');
+    img.src=`/tile/${encodeURIComponent(S.map)}/${encodeURIComponent(key)}.png`;
+    img.style.cssText='position:absolute;inset:0;width:100%;height:100%';
+    img.draggable=false;
+    tw.appendChild(img);
+  } else {
+    const ph=document.createElement('div');
+    ph.className='tp'; ph.style.cssText='position:absolute;inset:0';
+    ph.innerHTML=`<span>${esc(mod.label||key)}</span>`;
+    tw.appendChild(ph);
+  }
+  if(S.focusMarkers){
+    const sc=S.markerScale*FOCUS_MARKER_SCALE_MULT;
+    const svg=mkOverlay(mod,FW,FH,key,sc);
+    svg.style.cssText='position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none';
+    tw.appendChild(svg);
+  }
+  const body=id('fm-body'); body.innerHTML=''; body.appendChild(tw);
+  const vis=(mod.items||[]).filter(i=>S.visible.has(i.cat)).length;
+  const tot=(mod.items||[]).length;
+  id('fm-info').textContent=`${key}  •  ${vis} markers shown  (${tot} total items)`;
+  id('fm').style.display='flex';
+}
+
+function closeFocus(){ id('fm').style.display='none'; S.focusKey=null; }
+
+function toggleSettings(){
+  const sp=id('sp');
+  sp.style.display=sp.style.display==='flex'?'none':'flex';
 }
 
 function applyX(){
@@ -253,6 +317,20 @@ function bindAll(){
   });
   id('cb-lbl').addEventListener('change',e=>{ S.showLbls=e.target.checked; render(); });
   id('cb-mk') .addEventListener('change',e=>{ S.showMks =e.target.checked; render(); });
+  id('btn-gear').addEventListener('click', toggleSettings);
+  id('sp-cls').addEventListener('click',()=>{ id('sp').style.display='none'; });
+  id('sld-ms').addEventListener('input',e=>{
+    S.markerScale=parseFloat(e.target.value);
+    id('sld-ms-val').textContent=S.markerScale.toFixed(1);
+    render();
+  });
+  id('cb-mk-focus').addEventListener('change',e=>{ S.focusMarkers=e.target.checked; });
+  id('cb-lbl-dark').addEventListener('change',e=>{
+    document.documentElement.style.setProperty('--lbl-color', e.target.checked?LBL_COLOR_DARK:LBL_COLOR_LIGHT);
+    render();
+  });
+  id('fm-cls').addEventListener('click', closeFocus);
+  id('fm-bg').addEventListener('click', closeFocus);
   id('btn-tall').addEventListener('click',()=>{
     const allOn=Object.keys(CATS).every(c=>S.visible.has(c));
     allOn?S.visible.clear():Object.keys(CATS).forEach(c=>S.visible.add(c));
@@ -262,6 +340,7 @@ function bindAll(){
   id('bzo').addEventListener('click',()=>zoomAt(0.80,vp.clientWidth/2,vp.clientHeight/2));
   id('bft').addEventListener('click',fit);
   document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){ closeFocus(); return; }
     if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName)) return;
     if(e.key==='+'||e.key==='=') zoomAt(1.2, vp.clientWidth/2, vp.clientHeight/2);
     if(e.key==='-')              zoomAt(0.83,vp.clientWidth/2, vp.clientHeight/2);
@@ -274,18 +353,20 @@ function bindAll(){
   },{passive:false});
   vp.addEventListener('mousedown',e=>{
     if(e.target.closest('.mk')) return;
+    _dragMoved=false;
     S.drag=true; S.dx=e.clientX; S.dy=e.clientY; S.px=S.panX; S.py=S.panY;
     vp.classList.add('gb');
   });
   window.addEventListener('mousemove',e=>{
     if(!S.drag) return;
+    if(Math.abs(e.clientX-S.dx)+Math.abs(e.clientY-S.dy)>DRAG_THRESHOLD) _dragMoved=true;
     S.panX=S.px+(e.clientX-S.dx); S.panY=S.py+(e.clientY-S.dy); applyX();
   });
   window.addEventListener('mouseup',()=>{ S.drag=false; vp.classList.remove('gb'); });
   let ltd=0,ltc=null;
   vp.addEventListener('touchstart',e=>{
     if(e.touches.length===1){ S.drag=true; S.dx=e.touches[0].clientX; S.dy=e.touches[0].clientY; S.px=S.panX; S.py=S.panY; }
-    if(e.touches.length===2){ const a=e.touches[0],b=e.touches[1]; ltd=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY); ltc={(x:(a.clientX+b.clientX)/2,y:(a.clientY+b.clientY)/2)}; }
+    if(e.touches.length===2){ const a=e.touches[0],b=e.touches[1]; ltd=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY); ltc={x:(a.clientX+b.clientX)/2,y:(a.clientY+b.clientY)/2}; }
   },{passive:true});
   vp.addEventListener('touchmove',e=>{
     if(e.touches.length===1&&S.drag){ S.panX=S.px+(e.touches[0].clientX-S.dx); S.panY=S.py+(e.touches[0].clientY-S.dy); applyX(); }

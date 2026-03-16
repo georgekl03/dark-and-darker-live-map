@@ -96,6 +96,10 @@ def get_layout(name, manifest):
         return KNOWN_LAYOUTS[name]
     return auto_layout(manifest.get(name,{}).get("moduleKeys",[]))
 
+# Delay (ms) before re-rendering the focus canvas to allow Tkinter to report
+# the canvas's real pixel dimensions on the very first selection.
+FOCUS_RENDER_DELAY_MS = 50
+
 # ── Settings ──────────────────────────────────────────────
 SETTINGS_PATH = DATA / "settings.json"
 DEFAULTS = {
@@ -133,6 +137,8 @@ def load_map(map_name, mode, manifest):
     out = {}
     for mk, mv in raw.items():
         if not isinstance(mv, dict): continue
+        if mk.endswith("_Arena"):
+            continue
         if mk in layout:
             col,row,span = layout[mk]
         else:
@@ -158,7 +164,7 @@ def load_map(map_name, mode, manifest):
             "col":col,"row":row,"span":span,
             "label":localized.get(mk, mv.get("Module_LocalizedString",mk) or mk),
             "bbox":bbox,"items":items,
-            "has_png":(MODULES/map_name/f"{mk}.png").exists(),
+            "has_png":_is_png_file(MODULES/map_name/f"{mk}.png"),
         }
     return out
 
@@ -504,6 +510,7 @@ class App(tk.Tk):
         if idx<len(self._mk_order):
             self.focus_key=self._mk_order[idx]
             self._draw_focus()
+            self.after(FOCUS_RENDER_DELAY_MS, self._draw_focus)
             self._centre(self.focus_key)
 
     # ── Filters ───────────────────────────────────────────

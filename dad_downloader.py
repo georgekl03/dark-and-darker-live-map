@@ -252,6 +252,8 @@ def download_module_pngs(map_name: str, module_keys: list[str],
 
     tasks = []
     for key in module_keys:
+        if key.endswith("_Arena"):
+            continue
         dest = out_dir / f"{key}.png"
         url  = get_module_png_url(map_name, key)
         tasks.append((url, dest))
