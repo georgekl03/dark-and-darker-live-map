@@ -30,6 +30,20 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
+# ── optional SVG → PNG conversion ─────────────────────────
+try:
+    import cairosvg
+    CAIROSVG_OK = True
+except Exception:
+    CAIROSVG_OK = False
+
+try:
+    from PIL import Image
+    import io as _io
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+
 # ─────────────────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────────────────
