@@ -1425,7 +1425,7 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
              lambda p: _combo(p, "bbox_method",
                               ["mean", "median", "trimmed_mean", "edge"]))
         _row(f, "search_margin % (0-25):",
-             lambda p: _spin(p, "search_margin", 0, 25, 1, 5, is_float=True))
+             lambda p: _spin(p, "search_margin", 0, 25, 0.5, 5, is_float=True))
         _row(f, "min_frac (0.05-0.90):",
              lambda p: _spin(p, "min_frac", 0.05, 0.90, 0.05, 6, is_float=True))
         _row(f, "max_frac (0.10-0.99):",
@@ -1487,8 +1487,8 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
         f = _lf(settings_frame, "Bypass BBox")
         _row(f, "bypass_bbox:",
              lambda p: _check(p, "bypass_bbox"))
-        _row(f, "bypass_crop_pct % (60-100):",
-             lambda p: _spin(p, "bypass_crop_pct", 60, 100, 5, 5, is_float=True))
+        _row(f, "bypass_crop_pct % (10-100):",
+             lambda p: _spin(p, "bypass_crop_pct", 10, 100, 5, 5, is_float=True))
 
         # ── Settings management buttons ───────────────────
         btn_frame = tk.Frame(settings_frame, bg=PANEL)
