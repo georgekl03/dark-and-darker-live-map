@@ -46,7 +46,7 @@ _HERE                 = Path(__file__).parent
 MINIMAP_SETTINGS_PATH = _HERE / "data" / "minimap_settings.json"
 
 DEFAULT_MINIMAP_SETTINGS: dict = {
-    "version": 2,
+    "version": 3,
     "roi": {
         "left":   1700,
         "top":    860,
@@ -71,11 +71,13 @@ DEFAULT_MINIMAP_SETTINGS: dict = {
         "morph_kernel": 2,   # morphological close kernel half-size
     },
     "direction": {
-        "r1":          10.0,  # inner sampling circle radius (px)
-        "r2":          18.0,  # outer sampling circle radius (px)
-        "samples":     90,    # sample points per circle
-        "cluster_gap": 20.0,  # angular gap (deg) that separates clusters
-        "min_hits":    2,     # minimum hits to form a valid cluster
+        "r1":              10.0,  # inner sampling circle radius (px)
+        "r2":              18.0,  # outer sampling circle radius (px)
+        "samples":         90,    # sample points per circle
+        "cluster_gap":     20.0,  # angular gap (deg) that separates clusters
+        "min_hits":        2,     # minimum hits to form a valid cluster
+        "cone_enabled":    False, # restrict R1 hit analysis to a forward cone
+        "cone_half_angle": 90.0,  # half-width of the forward cone in degrees
     },
     "tip": {
         "enabled":     True,
@@ -93,10 +95,32 @@ DEFAULT_MINIMAP_SETTINGS: dict = {
         "show_pivot":        True,
         "show_circles":      True,
         "show_hits":         True,
+        "show_cone":         True,
         "show_bisector":     True,
         "show_heading":      True,
         "show_tip":          True,
+        "show_bbox":         False,
         "show_debug_text":   True,
+    },
+    # RGBA color tuples [R, G, B, A] (0-255 each) for every drawn element.
+    # Adjust to taste; alpha=0 makes an element invisible without toggling it off.
+    "colors": {
+        "pivot_outline":   [0,   255, 100, 230],
+        "pivot_crosshair": [0,   255, 100, 160],
+        "r1_circle":       [255, 200,  50, 110],
+        "r2_circle":       [80,  200, 255, 110],
+        "r1_hits":         [255, 140,   0, 210],
+        "r2_hits":         [0,   200, 255, 210],
+        "cone_fill":       [255, 200,  50,  35],
+        "cone_outline":    [255, 200,  50, 180],
+        "cluster_lines":   [160,  80, 220, 180],
+        "bisector":        [200, 100, 255, 160],
+        "heading_arrow":   [255,  70,  70, 240],
+        "tip_outline":     [255,  40, 200, 210],
+        "track_pt":        [255, 255, 255, 200],
+        "bbox":            [200, 200, 255, 140],
+        "green_tint":      [0,   220,  80,  90],
+        "outline_tint":    [220,  60,  60, 130],
     },
 }
 
@@ -572,12 +596,49 @@ def _count_bright_along_ray(img, pivot, angle_deg, length, bright_thresh=140):
     return count
 
 
+def _bbox_from_mask(mask_info):
+    """Return the bounding box (x0, y0, x1, y1) of non-zero pixels in the
+    outline mask, in full-image coordinates.  Returns None if the mask is empty.
+    """
+    ox, oy = mask_info["origin"]
+    mask   = mask_info["mask"]
+    if _HAVE_NUMPY:
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return None
+        return (int(xs.min()) + ox, int(ys.min()) + oy,
+                int(xs.max()) + ox, int(ys.max()) + oy)
+    else:
+        sw, sh = mask_info["size"]
+        x0 = y0 = 10**9
+        x1 = y1 = -1
+        for row in range(sh):
+            for col in range(sw):
+                if mask[row][col] > 0:
+                    if col < x0: x0 = col
+                    if col > x1: x1 = col
+                    if row < y0: y0 = row
+                    if row > y1: y1 = row
+        if x1 < 0:
+            return None
+        return (x0 + ox, y0 + oy, x1 + ox, y1 + oy)
+
+
 def find_direction_circles(img, pivot, params_outline=None, params_dir=None):
     """Estimate cursor heading using circle-based outline intersection.
 
-    Draws two circles (R1 and R2) around the pivot, samples outline mask hits,
-    clusters them into left/right edge groups, computes the bisector, and
-    disambiguates forward vs backward with a brightness raycast.
+    Algorithm
+    ---------
+    1. Sample the cursor outline mask on both R1 (inner) and R2 (outer) circles.
+    2. **R2 tip hint**: compute the mean direction of all R2 hits – this points
+       toward the cursor tip because R2 is sized to just reach the tip.
+    3. **Cone filter** (optional): if ``cone_enabled`` is True, restrict R1 hits
+       to those within ±``cone_half_angle`` degrees of the R2 tip hint, which
+       discards any hits from the cursor's back arc.
+    4. Cluster the (filtered) R1 hits to find the two side edges.
+    5. Bisect those two clusters for the raw forward/backward axis.
+    6. **Disambiguation**: pick the bisector half that is closer to the R2 tip
+       hint.  Falls back to bright-pixel ray-casting when R2 gives no hits.
 
     Parameters
     ----------
@@ -589,12 +650,17 @@ def find_direction_circles(img, pivot, params_outline=None, params_dir=None):
     Returns
     -------
     dict with:
-      "heading"    : float degrees (0=north, 90=east), or None
-      "confidence" : 0-1 float
-      "bisector"   : raw bisector angle (before disambiguation) or None
-      "clusters"   : list of cluster dicts (see _cluster_hits)
-      "r1_samples" : list of (angle, hit) for R1
-      "r2_samples" : list of (angle, hit) for R2
+      "heading"         : float degrees (0=north, 90=east), or None
+      "confidence"      : 0-1 float
+      "bisector"        : raw bisector angle (before disambiguation) or None
+      "clusters"        : list of cluster dicts (see _cluster_hits)
+      "r1_samples"      : list of (angle, hit) for R1
+      "r2_samples"      : list of (angle, hit) for R2
+      "r2_hint"         : mean angle of R2 hits (tip direction hint), or None
+      "cone_dir"        : direction used for the cone filter (same as r2_hint)
+      "cone_half_angle" : half-width of the cone in degrees
+      "bbox"            : (x0,y0,x1,y1) bounding box of cursor outline pixels
+                          in image coords, or None
     or None on failure.
     """
     if img is None or pivot is None:
@@ -604,11 +670,13 @@ def find_direction_circles(img, pivot, params_outline=None, params_dir=None):
     if params_dir is None:
         params_dir = DEFAULT_MINIMAP_SETTINGS["direction"]
 
-    r1          = float(params_dir.get("r1", 10.0))
-    r2          = float(params_dir.get("r2", 18.0))
-    samples_n   = max(8, int(params_dir.get("samples", 90)))
-    cluster_gap = float(params_dir.get("cluster_gap", 20.0))
-    min_hits    = max(1, int(params_dir.get("min_hits", 2)))
+    r1              = float(params_dir.get("r1", 10.0))
+    r2              = float(params_dir.get("r2", 18.0))
+    samples_n       = max(8, int(params_dir.get("samples", 90)))
+    cluster_gap     = float(params_dir.get("cluster_gap", 20.0))
+    min_hits        = max(1, int(params_dir.get("min_hits", 2)))
+    cone_enabled    = bool(params_dir.get("cone_enabled", False))
+    cone_half_angle = float(params_dir.get("cone_half_angle", 90.0))
 
     # Build outline mask
     mask_info = build_outline_mask(img, pivot, params_outline)
@@ -627,61 +695,94 @@ def find_direction_circles(img, pivot, params_outline=None, params_dir=None):
     r1_samples = _sample_mask_at(mask_info, pivot, r1, samples_n)
     r2_samples = _sample_mask_at(mask_info, pivot, r2, samples_n)
 
-    # Combine hits for clustering
-    combined = r1_samples + r2_samples
+    # -- R2 tip direction hint ------------------------------------------------
+    r2_hit_angles = [a for a, h in r2_samples if h]
+    r2_hint = _mean_angle(r2_hit_angles) if r2_hit_angles else None
+
+    # Cone filter on R1 hits: keep a hit only when it falls inside the R2-derived
+    # forward cone; non-hits are always kept as-is (they carry no information).
+    if cone_enabled and r2_hint is not None:
+        r1_for_cluster = [
+            (a, h and abs(_angle_diff(a, r2_hint)) <= cone_half_angle)
+            for a, h in r1_samples
+        ]
+    else:
+        r1_for_cluster = r1_samples
+
+    # -- Cluster to find the two cursor-side edges ----------------------------
+    combined = r1_for_cluster + r2_samples
     clusters = _cluster_hits(combined, gap_deg=cluster_gap, min_hits=min_hits)
 
     if len(clusters) < 2:
-        # Fallback: try just one circle each separately
-        clusters_r1 = _cluster_hits(r1_samples, gap_deg=cluster_gap, min_hits=min_hits)
-        clusters_r2 = _cluster_hits(r2_samples, gap_deg=cluster_gap, min_hits=min_hits)
-        clusters = (clusters_r1 + clusters_r2)
+        # Fallback: try each circle separately
+        clusters_r1 = _cluster_hits(r1_for_cluster,
+                                     gap_deg=cluster_gap, min_hits=min_hits)
+        clusters_r2 = _cluster_hits(r2_samples,
+                                     gap_deg=cluster_gap, min_hits=min_hits)
+        clusters = clusters_r1 + clusters_r2
         clusters.sort(key=lambda x: x["size"], reverse=True)
 
-    if len(clusters) < 2:
-        return {
-            "heading":    None,
-            "confidence": 0.0,
-            "bisector":   None,
-            "clusters":   clusters,
-            "r1_samples": r1_samples,
-            "r2_samples": r2_samples,
-        }
+    # Bounding box of cursor outline pixels
+    bbox = _bbox_from_mask(mask_info)
 
-    # Take the two largest clusters as left/right edges
+    _empty = {
+        "heading":         None,
+        "confidence":      0.0,
+        "bisector":        None,
+        "clusters":        clusters,
+        "r1_samples":      r1_samples,
+        "r2_samples":      r2_samples,
+        "r2_hint":         r2_hint,
+        "cone_dir":        r2_hint,
+        "cone_half_angle": cone_half_angle,
+        "bbox":            bbox,
+    }
+
+    if len(clusters) < 2:
+        return _empty
+
+    # -- Bisect the two largest clusters --------------------------------------
     cl_a = clusters[0]["mid"]
     cl_b = clusters[1]["mid"]
-
-    # Bisector: mean angle of the two cluster midpoints
     bisector = _mean_angle([cl_a, cl_b])
 
-    # Two candidates: bisector and bisector+180
+    # Two 180° candidates
     cand_a = bisector % 360.0
     cand_b = (bisector + 180.0) % 360.0
 
-    # Disambiguate: count bright pixels along each candidate ray
-    ray_len = float(params_dir.get("r2", 18.0)) * 1.5
-    score_a = _count_bright_along_ray(img, pivot, cand_a, ray_len)
-    score_b = _count_bright_along_ray(img, pivot, cand_b, ray_len)
+    # -- Disambiguation -------------------------------------------------------
+    # Primary: use R2 tip hint – the candidate closer to R2 hits is forward.
+    if r2_hint is not None:
+        dist_a = abs(_angle_diff(cand_a, r2_hint))
+        dist_b = abs(_angle_diff(cand_b, r2_hint))
+        heading = cand_a if dist_a <= dist_b else cand_b
+        score_ratio = abs(dist_b - dist_a) / (dist_a + dist_b + 1e-6)
+    else:
+        # Fallback: count bright pixels along each candidate ray
+        ray_len = r2 * 1.5
+        score_a = _count_bright_along_ray(img, pivot, cand_a, ray_len)
+        score_b = _count_bright_along_ray(img, pivot, cand_b, ray_len)
+        heading = cand_a if score_a >= score_b else cand_b
+        total   = score_a + score_b
+        score_ratio = abs(score_a - score_b) / (total + 1e-6) if total else 0.0
 
-    heading = cand_a if score_a >= score_b else cand_b
-
-    # Confidence: based on number of clusters and their size balance
-    total_hits = clusters[0]["size"] + clusters[1]["size"]
+    # -- Confidence -----------------------------------------------------------
+    total_hits   = clusters[0]["size"] + clusters[1]["size"]
     max_possible = samples_n * 2
     conf = min(1.0, total_hits / max(1.0, max_possible * 0.3))
-    # Bonus if score difference is large
-    if score_a + score_b > 0:
-        score_ratio = abs(score_a - score_b) / (score_a + score_b + 1e-6)
-        conf = min(1.0, conf * (0.5 + 0.5 * score_ratio))
+    conf = min(1.0, conf * (0.5 + 0.5 * score_ratio))
 
     return {
-        "heading":    heading,
-        "confidence": conf,
-        "bisector":   bisector,
-        "clusters":   clusters,
-        "r1_samples": r1_samples,
-        "r2_samples": r2_samples,
+        "heading":         heading,
+        "confidence":      conf,
+        "bisector":        bisector,
+        "clusters":        clusters,
+        "r1_samples":      r1_samples,
+        "r2_samples":      r2_samples,
+        "r2_hint":         r2_hint,
+        "cone_dir":        r2_hint,
+        "cone_half_angle": cone_half_angle,
+        "bbox":            bbox,
     }
 
 
