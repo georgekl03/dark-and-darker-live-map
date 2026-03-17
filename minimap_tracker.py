@@ -339,8 +339,7 @@ def render_overlay(img, det, overlays, view_mode="composite", colors=None):
     if overlays.get("show_bbox") and dir_result is not None:
         bbox = dir_result.get("bbox")
         if bbox is not None:
-            x0, y0_bb, x1, y1 = bbox
-            draw.rectangle([x0, y0_bb, x1, y1],
+            draw.rectangle(list(bbox),
                            outline=_c(colors, "bbox", (200, 200, 255, 140)), width=1)
 
     # Debug text readout

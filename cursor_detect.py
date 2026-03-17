@@ -699,14 +699,11 @@ def find_direction_circles(img, pivot, params_outline=None, params_dir=None):
     r2_hit_angles = [a for a, h in r2_samples if h]
     r2_hint = _mean_angle(r2_hit_angles) if r2_hit_angles else None
 
-    # -- Cone filter on R1 hits -----------------------------------------------
-    # When enabled, keep only R1 hits within the forward cone defined by the
-    # R2 tip hint.  Non-hit samples are always kept (they carry no information
-    # but the clustering needs a consistent sample density).
+    # Cone filter on R1 hits: keep a hit only when it falls inside the R2-derived
+    # forward cone; non-hits are always kept as-is (they carry no information).
     if cone_enabled and r2_hint is not None:
         r1_for_cluster = [
-            (a, h if (not h or abs(_angle_diff(a, r2_hint)) <= cone_half_angle)
-             else False)
+            (a, h and abs(_angle_diff(a, r2_hint)) <= cone_half_angle)
             for a, h in r1_samples
         ]
     else:
