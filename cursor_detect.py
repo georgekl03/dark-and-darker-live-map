@@ -264,12 +264,14 @@ def find_green_dot(img, params=None):
 
         # Morphological close (simple dilation then erosion)
         if k > 0:
-            from scipy.ndimage import binary_closing
             try:
-                closed = binary_closing(green_mask, iterations=k).astype(np.uint8) * 255
+                # scipy provides an optimised binary_closing; ImportError is caught
+                # so the manual fallback below is used when scipy is absent.
+                from scipy.ndimage import binary_closing
+                closed = binary_closing(green_mask > 0, iterations=k).astype(np.uint8) * 255
                 green_mask = closed
-            except ImportError:
-                # Manual 2D max-pool dilation fallback
+            except (ImportError, Exception):
+                # Manual box-morphology fallback (no scipy required)
                 for _ in range(k):
                     padded = np.pad(green_mask, 1, mode="constant")
                     dilated = np.zeros_like(green_mask)
@@ -421,8 +423,8 @@ def build_outline_mask(img, pivot, params=None):
         if k > 0:
             try:
                 from scipy.ndimage import binary_closing
-                dark = binary_closing(dark, iterations=k).astype(np.uint8) * 255
-            except ImportError:
+                dark = binary_closing(dark > 0, iterations=k).astype(np.uint8) * 255
+            except (ImportError, Exception):
                 for _ in range(k):
                     padded = np.pad(dark, 1, mode="constant")
                     dilated = np.zeros_like(dark)
@@ -538,8 +540,8 @@ def _cluster_hits(samples, gap_deg=20.0, min_hits=2):
             current = [a]
     # Check wrap-around: last cluster with first cluster
     if clusters and (360.0 - hits_sorted[-1] + hits_sorted[0]) <= gap_deg:
-        clusters[0] = hits_sorted[-len(current):] + current + clusters[0]
-        clusters.pop()
+        # Merge the last cluster (current) with the first cluster
+        clusters[0] = current + clusters[0]
     else:
         clusters.append(current)
 
