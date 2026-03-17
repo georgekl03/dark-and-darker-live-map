@@ -39,6 +39,13 @@ try:
 except ImportError:
     _HAVE_MSS = False
 
+# Optional: cursor_detect for robust minimap cursor tracking
+try:
+    import cursor_detect as _cd
+    _HAVE_CURSOR_DETECT = True
+except ImportError:
+    _HAVE_CURSOR_DETECT = False
+
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
 RAW     = DATA / "raw"
@@ -1506,16 +1513,23 @@ class App(tk.Tk):
             if not (_HAVE_IMAGEGRAB or _HAVE_MSS):
                 self.status.set("[Track] Install mss or Pillow[ImageGrab] for tracking.")
                 return
-            mm_cfg = {
-                "left":   self.cfg.get("minimap_left",   1700),
-                "top":    self.cfg.get("minimap_top",    860),
-                "width":  self.cfg.get("minimap_width",  200),
-                "height": self.cfg.get("minimap_height", 200),
-            }
+            # Prefer calibrated settings from the debug tool if available
+            if _HAVE_CURSOR_DETECT:
+                _mm_settings = _cd.load_minimap_settings()
+                mm_cfg = dict(_mm_settings["roi"])
+            else:
+                mm_cfg = {
+                    "left":   self.cfg.get("minimap_left",   1700),
+                    "top":    self.cfg.get("minimap_top",    860),
+                    "width":  self.cfg.get("minimap_width",  200),
+                    "height": self.cfg.get("minimap_height", 200),
+                }
+                _mm_settings = None
             self._tracker = MinimapTracker(
                 minimap_region=mm_cfg,
                 callback=self._update_player_pos,
                 modules=self.modules,
+                mm_settings=_mm_settings,
             )
             self._tracker.start()
             self._track_lbl_var.set("\U0001F9ED  Track ON")
@@ -1769,12 +1783,12 @@ class MinimapTracker:
 
     Detection strategy
     ------------------
-    * Capture *only* the minimap region (default: bottom-right ~200 × 200 px).
+    * Capture *only* the minimap region (bottom-right, configurable).
       This is the smallest possible screenshot area – minimal CPU/memory cost.
-    * Convert to grayscale and find the brightest connected cluster of pixels.
-      In DnD the player arrow is the brightest element on the minimap.
-    * Calculate the cluster's centroid → player position in minimap space.
-    * Estimate facing angle from the cluster's axis of elongation.
+    * If cursor_detect is available (i.e. minimap_tracker.py calibration tool
+      has been run and settings saved), use its robust HSV green-dot detection
+      and circle-based direction algorithm.
+    * Otherwise fall back to the legacy brightness-threshold method.
     * Map minimap position to world coordinates via the known module bboxes.
 
     The tracker does *not* inject into the game process; it uses only passive
@@ -1783,23 +1797,31 @@ class MinimapTracker:
     """
 
     _INTERVAL_S     = 0.12    # ~8 FPS – lightweight
-    _BRIGHT_THRESH  = 200     # pixel brightness to count as "player"
-    _MIN_CLUSTER    = 4       # minimum bright pixels to accept as player
+    _BRIGHT_THRESH  = 200     # legacy: pixel brightness to count as "player"
+    _MIN_CLUSTER    = 4       # legacy: minimum bright pixels to accept
 
-    def __init__(self, minimap_region: dict, callback, modules: dict):
+    def __init__(self, minimap_region: dict, callback, modules: dict,
+                 mm_settings: "dict | None" = None):
         """
         Parameters
         ----------
         minimap_region : dict with keys left, top, width, height (screen pixels)
         callback       : callable(world_pos, angle_deg) called on main thread
         modules        : current map modules dict
+        mm_settings    : optional full minimap settings dict from cursor_detect
+                         (loaded from data/minimap_settings.json). When provided
+                         and cursor_detect is importable, enables robust tracking.
         """
-        self._region   = minimap_region
-        self._callback = callback
-        self._modules  = modules
-        self._thread: threading.Thread | None = None
-        self._stop_evt = threading.Event()
-        self.running   = False
+        self._region      = minimap_region
+        self._callback    = callback
+        self._modules     = modules
+        self._mm_settings = mm_settings
+        self._thread: "threading.Thread | None" = None
+        self._stop_evt    = threading.Event()
+        self.running      = False
+        # EMA state for smoothing
+        self._prev_center:  "tuple | None" = None
+        self._prev_heading: "float | None" = None
         # Precompute minimap-to-world mapping once
         self._build_world_bbox()
 
@@ -1882,17 +1904,58 @@ class MinimapTracker:
             try:
                 mm_img = self._capture_minimap()
                 if mm_img is not None:
-                    gray   = mm_img.convert("L")
-                    result = self._find_player(gray)
-                    if result is not None:
-                        rx, ry, ang = result
-                        world_pos   = self._minimap_to_world(rx, ry)
-                        if world_pos:
-                            self._callback(world_pos, ang)
+                    if _HAVE_CURSOR_DETECT and self._mm_settings is not None:
+                        self._loop_robust(mm_img)
+                    else:
+                        self._loop_legacy(mm_img)
             except Exception:
                 pass
             elapsed = time.monotonic() - t0
             self._stop_evt.wait(max(0.0, self._INTERVAL_S - elapsed))
+
+    def _loop_robust(self, mm_img):
+        """Detection using cursor_detect (HSV green dot + circle direction)."""
+        s = self._mm_settings
+        gd = _cd.find_green_dot(mm_img, s.get("green_dot"))
+        if not gd or gd.get("center") is None:
+            return
+        center = gd["center"]
+
+        dir_res = _cd.find_direction_circles(
+            mm_img, center,
+            params_outline=s.get("outline"),
+            params_dir=s.get("direction"),
+        )
+        heading = None
+        if dir_res:
+            heading = dir_res.get("heading")
+
+        sm = s.get("smoothing", _cd.DEFAULT_MINIMAP_SETTINGS["smoothing"])
+        center  = _cd.smooth_pos(center, self._prev_center,
+                                  alpha=sm.get("pivot_alpha", 0.5))
+        heading = _cd.smooth_angle(heading, self._prev_heading,
+                                    alpha=sm.get("heading_alpha", 0.4),
+                                    max_delta=sm.get("max_heading_delta", 60.0))
+        self._prev_center  = center
+        self._prev_heading = heading
+
+        if center is not None:
+            iw, ih = mm_img.size
+            rx = center[0] / max(1, iw)
+            ry = center[1] / max(1, ih)
+            world_pos = self._minimap_to_world(rx, ry)
+            if world_pos:
+                self._callback(world_pos, heading or 0.0)
+
+    def _loop_legacy(self, mm_img):
+        """Fallback detection: brightness threshold on greyscale image."""
+        gray   = mm_img.convert("L")
+        result = self._find_player(gray)
+        if result is not None:
+            rx, ry, ang = result
+            world_pos   = self._minimap_to_world(rx, ry)
+            if world_pos:
+                self._callback(world_pos, ang)
 
     def start(self):
         self._stop_evt.clear()
