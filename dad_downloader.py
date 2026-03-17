@@ -230,6 +230,19 @@ def local_status(manifest: dict) -> None:
     divider()
 
 # ─────────────────────────────────────────────────────────
+# PNG validation helper (used at download time and by purify)
+# ─────────────────────────────────────────────────────────
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+def _is_valid_png(path: Path) -> bool:
+    """Return True only if *path* starts with the 8-byte PNG signature."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(8) == PNG_SIG
+    except Exception:
+        return False
+
+# ─────────────────────────────────────────────────────────
 # Download: Map JSON
 # ─────────────────────────────────────────────────────────
 def download_map_json(map_name: str, map_info: dict, force: bool = False) -> bool:
@@ -260,7 +273,12 @@ def get_module_png_url(map_name: str, module_key: str) -> str:
 
 def download_module_pngs(map_name: str, module_keys: list[str],
                           force: bool = False, workers: int = 8) -> tuple[int, int]:
-    """Download all module PNGs for a map. Returns (ok_count, total)."""
+    """Download all module PNGs for a map. Returns (ok_count, total).
+
+    After each download the file is verified to be a real PNG (8-byte magic).
+    Files that are not valid PNGs (e.g. HTML error pages from the server) are
+    deleted immediately so they do not pollute the cache.
+    """
     out_dir = MODULES / map_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -276,7 +294,47 @@ def download_module_pngs(map_name: str, module_keys: list[str],
 
     def worker(args):
         url, dest = args
-        return download_file(url, dest, force=force)
+        # If already cached, validate it first
+        if dest.exists() and not force:
+            if _is_valid_png(dest):
+                return True
+            # Cached file is corrupt – delete and re-download
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+        # Download to a temp file, then validate before keeping
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".png.tmp")
+        r = get(url, stream=True)
+        if r is None:
+            return False
+        try:
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+        except Exception:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            return False
+        # Validate: only keep genuine PNG files
+        if not _is_valid_png(tmp):
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            return False
+        try:
+            tmp.rename(dest)
+        except Exception:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            return False
+        return True
 
     print(f"  Downloading {total} module PNGs for {c(map_name, 'cyan')}…")
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -465,16 +523,7 @@ def clear_cache(what: str = "all"):
 # ─────────────────────────────────────────────────────────
 # PNG purification
 # ─────────────────────────────────────────────────────────
-PNG_SIG = b"\x89PNG\r\n\x1a\n"
-
-def _is_valid_png(path: Path) -> bool:
-    """Return True only if *path* starts with the 8-byte PNG signature."""
-    try:
-        with open(path, "rb") as f:
-            return f.read(8) == PNG_SIG
-    except Exception:
-        return False
-
+# (PNG_SIG and _is_valid_png are defined earlier, near the download helpers)
 
 def purify_module_pngs(manifest: dict, redownload: bool = False, force_redownload: bool = False) -> dict:
     """
