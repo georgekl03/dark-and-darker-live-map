@@ -203,19 +203,22 @@ Click **Track** in the map toolbar to start/stop live player tracking.
 The tracker captures a small screen region (the minimap) on a background thread
 (~8 Hz) and detects:
 - **Position** – from the green dot at the player's feet.
-- **Direction** – from the pale arrow cursor around the green dot.
+- **Direction** – from the triangular cursor outline around the green dot.
 
-Configure the minimap region in **`minimap_tracker.py`** (see [Minimap Tracker Debug Tool](#minimap-tracker-debug-tool-minimap_trackerpy)
-for calibration steps), then set the same values in the `_region` defaults at the top of your tracker config.
+The tracker automatically loads calibrated settings from
+`data/minimap_settings.json` when that file exists (created by
+`minimap_tracker.py`). Use the **Minimap Tracker Debug Tool** to calibrate
+and save your settings before starting tracking.
 
-| Setting         | Default | Description                  |
-|-----------------|---------|------------------------------|
-| Left            | 1700    | Screen X of minimap left edge|
-| Top             | 860     | Screen Y of minimap top edge |
-| Width           | 200     | Capture width in pixels      |
-| Height          | 200     | Capture height in pixels     |
+| Setting | Default | Description                   |
+|---------|---------|-------------------------------|
+| Left    | 1700    | Screen X of minimap left edge |
+| Top     | 860     | Screen Y of minimap top edge  |
+| Width   | 220     | Capture width in pixels       |
+| Height  | 220     | Capture height in pixels      |
 
-Use `minimap_tracker.py` to calibrate these values visually.
+> **Tip:** Run `minimap_tracker.py` once to calibrate the settings for your
+> screen resolution and save them.  The main viewer picks them up automatically.
 
 ---
 
@@ -256,62 +259,181 @@ offline (no game required) which makes it ideal for:
 
 ## Minimap Tracker Debug Tool (`minimap_tracker.py`)
 
-A standalone tool for developing and testing the player-position tracker.
+A full calibration and visualisation tool for the player cursor tracker.
+Run it to configure all detection settings, see overlays live, and save your
+calibration so `map_viewer.py` automatically picks it up.
 
 ```bash
 python minimap_tracker.py
 ```
 
-### Features
+---
 
-- **Load Image** – load a static minimap screenshot for offline analysis.
-- **Grab Region** – capture the configured screen region once.
-- **Start Live / Stop Live** – toggle continuous capture at ~8 Hz with live overlay.
-- **Analyse** – reprocess the current static image with updated parameters.
+### Toolbar actions
 
-### Debug overlays
+| Button        | Action                                                         |
+|---------------|----------------------------------------------------------------|
+| Load Image    | Load a static PNG/JPG minimap screenshot for offline analysis  |
+| Grab Region   | Capture the configured screen region once                      |
+| Start Live    | Start continuous capture (~8 Hz) with live overlays            |
+| Stop Live     | Stop continuous capture                                        |
+| Analyse       | Re-run detection on the current image with updated parameters  |
 
-When a player is detected, the image shows:
-- 🟢 **Green circle** around the detected green dot (player position).
-- 🟡 **Yellow ring** at the sampling radius used for direction detection.
-- 🔴 **Red arrow** indicating the estimated facing direction.
+**View selector** (top toolbar) switches the canvas between:
+- **Composite** – all enabled overlay layers drawn on the minimap image
+- **Green Mask** – only the HSV green-dot detection mask (tinted green)
+- **Outline Mask** – only the dark-pixel cursor outline mask (tinted red)
 
-### Detection parameters
+---
 
-| Parameter        | Default | Description                                         |
-|------------------|---------|-----------------------------------------------------|
-| Min G value      | 120     | Minimum green channel brightness for "green" pixels |
-| G / R ratio      | 1.8     | Green must be ≥ this × red                         |
-| G / B ratio      | 1.8     | Green must be ≥ this × blue                        |
-| Dot radius (px)  | 4       | Visual size of the position circle overlay          |
-| Ring radius (px) | 15      | Radius of direction-sampling ring                   |
-| Sample points    | 36      | Angular resolution (36 = 10° steps)                 |
-| Bright threshold | 160     | Minimum brightness on ring to count as cursor       |
+### Debug overlays (Composite view)
+
+| Layer              | Colour     | Description                                                      |
+|--------------------|------------|------------------------------------------------------------------|
+| Green blob         | Green tint | Pixels matched by the HSV green-dot threshold                    |
+| Outline mask       | Red tint   | Dark pixels in the local window used as cursor outline           |
+| Pivot crosshair    | Green ring | Green dot centroid (player position) + cross-hair                |
+| R1 / R2 circles   | Yellow/Cyan| The two sampling circles used for direction detection            |
+| Circle hit points  | Orange/Cyan| Outline mask intersections on each sampling circle               |
+| Cluster midpoints  | Purple     | Mid-angle of each left/right edge cluster                        |
+| Raw bisector       | Purple     | Angle midway between the two edge clusters (pre-disambiguation)  |
+| Heading arrow      | Red        | Confirmed forward heading direction                              |
+| Tip ring           | Magenta    | Cursor tip found by raycast                                      |
+| Tracking point     | White dot  | Stable tracking point at configured distance from pivot          |
+| Debug text         | White      | Pivot coords, heading, confidence values, cluster count          |
+
+---
+
+### Settings reference
+
+#### Capture Region
+These four spinboxes define which part of the screen is captured.
+The minimap is always bottom-right; adjust to match your resolution.
+
+| Setting    | Default | Description                          |
+|------------|---------|--------------------------------------|
+| Left       | 1700    | Screen X (pixels) of minimap left edge |
+| Top        | 860     | Screen Y (pixels) of minimap top edge  |
+| Width      | 220     | Capture width in pixels                |
+| Height     | 220     | Capture height in pixels               |
+
+---
+
+#### Green Dot Detection
+The green dot at the player's feet is the primary anchor.  It has a bright
+centre fading to darker edges and is not a perfect circle, so HSV thresholding
+is used instead of a simple colour match.
+
+All HSV values use OpenCV convention: **H 0–179, S/V 0–255**.
+
+| Parameter              | Default | What it controls                                                 |
+|------------------------|---------|------------------------------------------------------------------|
+| Hue min / max          | 40–90   | Hue band for green (lower → more yellow-green; higher → blue-green) |
+| Saturation min / max   | 80–255  | Reject grey/white pixels (low S) and over-saturated noise (high S) |
+| Value (brightness) min | 60      | Include dim dot edges; lower if the dot edges are very dark     |
+| Value (brightness) max | 255     | Upper brightness bound (rarely needs changing)                  |
+| Morph kernel           | 2       | Morphological-close kernel half-size to join blob fragments     |
+| Min area (px²)         | 4       | Discard specks smaller than this                                |
+| Max area (px²)         | 400     | Discard false blobs larger than this                            |
+
+**Tip:** Enable the *Green Mask* view mode to see exactly which pixels are matched.
+
+---
+
+#### Cursor Outline Mask
+Extracts the black outline of the triangular cursor in a local window around
+the pivot.  These dark pixels are what the circle sampling detects.
+
+| Parameter       | Default | What it controls                                                 |
+|-----------------|---------|------------------------------------------------------------------|
+| Dark threshold  | 60      | Pixels with grey value < this are marked as "black outline"     |
+| Local window    | 30      | Half-size of the processing area around the pivot (px)          |
+| Morph kernel    | 2       | Close small gaps in the outline mask                            |
+
+**Tip:** Enable the *Outline Mask* view mode to see the extracted cursor outline.
+Raise *Dark threshold* if the outline looks broken; lower it if map floor
+features are leaking into the mask.
+
+---
+
+#### Direction Detection
+Two circles (R1 inner, R2 outer) are sampled around the pivot.  Each circle
+produces intersection hits with the outline mask.  The hits cluster into two
+groups (left and right edges of the cursor triangle); the angle between them
+bisects toward the forward heading.
+
+| Parameter           | Default | What it controls                                                 |
+|---------------------|---------|------------------------------------------------------------------|
+| R1 – inner radius   | 10      | Inner circle radius; should sit inside the cursor body          |
+| R2 – outer radius   | 18      | Outer circle radius; should be near or past the cursor outline  |
+| Samples per circle  | 90      | 360 ÷ N = angular step between sample points                    |
+| Cluster gap (deg)   | 20      | Angular gap that separates the left and right edge clusters     |
+| Min hits per cluster| 2       | Clusters with fewer hits than this are discarded                |
+
+**Tip:** With *Show R1/R2 circles* and *Show hits* enabled, the yellow/cyan
+dots should appear on the left and right sides of the cursor triangle.  If the
+dots are scattered, reduce *Cluster gap* or increase *Samples*.
+
+---
+
+#### Tip Detection
+Optional raycast from the pivot along the detected heading to find the cursor
+tip and a stable tracking point.
+
+| Parameter           | Default | What it controls                                         |
+|---------------------|---------|----------------------------------------------------------|
+| Enable tip raycast  | ✓       | Toggle the entire tip-detection step                     |
+| Max raycast dist    | 35      | Maximum distance (px) the raycast searches from pivot   |
+| Tracking pt dist    | 3       | Stable tracking point: distance from pivot along heading |
+
+---
+
+#### Temporal Smoothing
+EMA (Exponential Moving Average) filter applied to pivot position and heading
+each frame to reduce jitter.
+
+| Parameter           | Default | What it controls                                                 |
+|---------------------|---------|------------------------------------------------------------------|
+| Heading alpha       | 0.4     | Weight for the newest heading sample (1.0 = no smoothing)       |
+| Pivot alpha         | 0.5     | Weight for the newest position sample (1.0 = no smoothing)      |
+| Max heading delta   | 60      | Maximum allowed heading change per frame (degrees)              |
+
+---
+
+### Save / Load settings
+
+Click **Save Settings** to write all current parameters to
+`data/minimap_settings.json`.  `map_viewer.py` loads this file automatically
+when *Track* is clicked, so no manual config copying is needed.
+
+Click **Load Settings** to reload the last saved configuration.
+
+---
 
 ### Calibration workflow
 
-1. Set the **Capture Region** spinboxes to match your minimap position on screen.
-2. Click **Grab Region** to capture the current frame.
-3. Adjust **Min G value** until only the green dot is highlighted (not the floor).
-4. Adjust **Ring radius** until the yellow ring sits inside the cursor arrow.
-5. Adjust **Bright threshold** until the red arrow points the correct direction.
-6. Click **Start Live** to confirm tracking works in real-time.
-
-### Why green-dot detection is robust
-
-The game minimap contains:
-- **Dark grey/brown** floor tiles
-- **Black** boundary walls
-- **Pale/white** player cursor arrow with black outline
-- **Green** dot at the exact player foot position
-
-The green dot is spectrally unique on the minimap – no other element has a
-dominant green channel.  Filtering by colour isolates it reliably even when
-the cursor overlaps a wall boundary.  For direction, the pale cursor tip is
-the next most distinctive feature: it is significantly brighter than the
-floor and uses a different greyscale from the wall borders.
+1. Open the game with the minimap visible in the bottom-right corner.
+2. Set **Capture Region** spinboxes to your minimap's screen position.
+   Click **Grab Region** to verify the correct area is captured.
+3. Switch to **Green Mask** view.  Adjust **Hue / Saturation / Value** ranges
+   until *only* the green dot is highlighted.
+4. Switch to **Outline Mask** view.  Adjust **Dark threshold** and
+   **Local window** until the cursor outline is clearly visible and walls
+   are not leaking into the mask.
+5. Switch to **Composite** view.  Ensure *Show circles* and *Show hits* are on.
+   Adjust **R1** and **R2** so the yellow/cyan hit dots appear on the left and
+   right edges of the triangle cursor.
+6. Check the **Heading arrow** (red) points in the direction the character faces.
+   If it points the wrong way, check *Show bisector* and *Show clusters* to
+   diagnose which cluster is dominant.
+7. Click **Start Live** and walk around in game.  The overlay should update
+   in real-time and the heading arrow should follow the cursor.
+8. Click **Save Settings** when satisfied.  The main **map_viewer.py** will
+   now use these calibrated parameters automatically.
 
 ---
+
+
 
 ## Data Downloader (`dad_downloader.py`)
 
@@ -394,18 +516,20 @@ If that fails: `pip install Pillow`
 
 ```
 dark-and-darker-live-map/
-├── map_viewer.py          Main map viewer application
-├── map_scanner.py         Standalone scanner debug tool
-├── minimap_tracker.py     Standalone minimap tracker debug tool
-├── dad_downloader.py      Data download and management CLI
-├── README.md              This file
+├── map_viewer.py              Main map viewer application
+├── map_scanner.py             Standalone scanner debug tool
+├── minimap_tracker.py         Minimap calibration & debug tool
+├── cursor_detect.py           Shared cursor detection module
+├── dad_downloader.py          Data download and management CLI
+├── README.md                  This file
 └── data/
-    ├── map_manifest.json  Map list (auto-downloaded)
-    ├── raw/               Per-map JSON data files
+    ├── map_manifest.json      Map list (auto-downloaded)
+    ├── minimap_settings.json  Cursor tracking calibration (saved by minimap_tracker.py)
+    ├── raw/                   Per-map JSON data files
     │   └── <MapName>.json
-    ├── modules/           Module PNG tiles
+    ├── modules/               Module PNG tiles
     │   └── <MapName>/
     │       └── <ModuleKey>.png
-    ├── loot/              Loot spawn data JSONs
-    └── icons/             Item icon PNGs
+    ├── loot/                  Loot spawn data JSONs
+    └── icons/                 Item icon PNGs
 ```
