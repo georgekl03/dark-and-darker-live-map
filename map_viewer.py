@@ -45,19 +45,19 @@ RAW     = DATA / "raw"
 MODULES = DATA / "modules"
 ICONS   = DATA / "icons"
 
-# ── Palette ───────────────────────────────────────────────
-BG      = "#0f0d0b"
-PANEL   = "#16151a"
-PANEL2  = "#1e1d24"
-BORDER  = "#2c2b36"
-BDR2    = "#3a3948"
+# ── Palette (modern dark-gray / gold — no purple) ─────────
+BG      = "#141414"
+PANEL   = "#1c1c1c"
+PANEL2  = "#242424"
+BORDER  = "#303030"
+BDR2    = "#424242"
 ACCENT  = "#c8a84b"
-TEXT    = "#dddad4"
-DIM     = "#78767a"
-DIM2    = "#464450"
-TILEBG  = "#131320"
-BTN_BG  = "#252430"
-BTN_HOV = "#353445"
+TEXT    = "#e0ddd8"
+DIM     = "#808080"
+DIM2    = "#525252"
+TILEBG  = "#1a1a1a"
+BTN_BG  = "#2a2a2a"
+BTN_HOV = "#3c3c3c"
 
 # ── Category config with subgroups ────────────────────────
 CATS = {
@@ -219,6 +219,12 @@ DEFAULTS = {
     "show_labels": True, "mode": "N", "last_map": "",
     "visible_cats_map":   list(DEFAULT_VISIBLE),
     "visible_cats_focus": list(DEFAULT_VISIBLE),
+    "keybinds": {
+        "scan_map": "Shift+M",
+        "fit":      "f",
+        "zoom_in":  "plus",
+        "zoom_out": "minus",
+    },
 }
 
 
@@ -587,40 +593,43 @@ class App(tk.Tk):
 
     # ── Build UI ──────────────────────────────────────────
     def _build(self):
+        # ── Outer horizontal split: left column | right map ──────────────
         pw = tk.PanedWindow(self, orient="horizontal", bg=BG,
                             sashwidth=4, sashrelief="flat", sashpad=0)
         pw.pack(fill="both", expand=True)
 
-        left = tk.Frame(pw, bg=PANEL, width=280)
-        left.pack_propagate(False)
-        pw.add(left, minsize=220)
-        self._build_sidebar(left)
+        # ── Left column container ─────────────────────────────────────────
+        left_col = tk.Frame(pw, bg=PANEL, width=300)
+        left_col.pack_propagate(False)
+        pw.add(left_col, minsize=240)
 
-        right = tk.Frame(pw, bg=BG)
-        pw.add(right, minsize=600)
-        rpw = tk.PanedWindow(right, orient="horizontal", bg=BG,
-                             sashwidth=4, sashrelief="flat", sashpad=0)
-        rpw.pack(fill="both", expand=True)
+        # App header pinned at top of left column
+        hdr = tk.Frame(left_col, bg=PANEL2, pady=7)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="\u2694  D&D  Map Viewer", bg=PANEL2, fg=ACCENT,
+                 font=("Segoe UI", 11, "bold"), padx=10).pack(anchor="w")
+        tk.Frame(left_col, bg=BORDER, height=1).pack(fill="x")
 
-        focus_f = tk.Frame(rpw, bg=PANEL2, width=320)
-        focus_f.pack_propagate(False)
-        rpw.add(focus_f, minsize=200)
+        # Vertical split: focus panel (top) | sidebar (bottom)
+        left_pw = tk.PanedWindow(left_col, orient="vertical", bg=BG,
+                                 sashwidth=4, sashrelief="flat", sashpad=0)
+        left_pw.pack(fill="both", expand=True)
+
+        focus_f = tk.Frame(left_pw, bg=PANEL2)
+        left_pw.add(focus_f, minsize=150, height=360)
         self._build_focus(focus_f)
 
-        map_f = tk.Frame(rpw, bg=BG)
-        rpw.add(map_f, minsize=400)
+        sidebar_f = tk.Frame(left_pw, bg=PANEL)
+        left_pw.add(sidebar_f, minsize=180)
+        self._build_sidebar(sidebar_f)
+
+        # ── Right column: map canvas (full height) ────────────────────────
+        map_f = tk.Frame(pw, bg=BG)
+        pw.add(map_f, minsize=600)
         self._build_map(map_f)
 
     # ── Sidebar ───────────────────────────────────────────
     def _build_sidebar(self, p):
-        hdr = tk.Frame(p, bg=PANEL2, pady=8)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text="\u2694  D&D Map Viewer", bg=PANEL2, fg=ACCENT,
-                 font=("Segoe UI", 12, "bold"), padx=12).pack(anchor="w")
-        tk.Label(hdr, text="darkanddarkertracker.com  \u2022  local data",
-                 bg=PANEL2, fg=DIM, font=("Segoe UI", 9), padx=12).pack(anchor="w")
-        tk.Frame(p, bg=BORDER, height=1).pack(fill="x")
-
         self._sf = ScrollFrame(p, bg=PANEL)
         self._sf.pack(fill="both", expand=True)
         b = self._sf.inner
@@ -658,20 +667,33 @@ class App(tk.Tk):
                                    selectforeground="#111", font=("Segoe UI", 10),
                                    bd=0, highlightthickness=1,
                                    highlightcolor=BDR2, highlightbackground=BORDER,
-                                   height=10, exportselection=False)
+                                   height=8, exportselection=False)
         self.mod_list.pack(fill="x", padx=8, pady=4)
         self.mod_list.bind("<<ListboxSelect>>", self._on_mod_select)
 
         # Loot Filters
         sec("Loot Filters")
-        # Column header row
+        # Global ALL / NONE row
+        gall_row = tk.Frame(b, bg=PANEL)
+        gall_row.pack(fill="x", padx=8, pady=(4, 2))
+        tk.Label(gall_row, text="All categories:", bg=PANEL, fg=DIM,
+                 font=("Segoe UI", 8)).pack(side="left")
+        flat_btn(gall_row, "ALL",  self._all_on,
+                 fg=DIM, bg=PANEL2, padx=6, pady=2,
+                 font=("Segoe UI", 8)).pack(side="right", padx=1)
+        flat_btn(gall_row, "NONE", self._all_off,
+                 fg=DIM, bg=PANEL2, padx=6, pady=2,
+                 font=("Segoe UI", 8)).pack(side="right", padx=1)
+
+        # Column header row  (Focus left | Map right — mirrors panel positions)
         hrow = tk.Frame(b, bg=PANEL)
         hrow.pack(fill="x", padx=8, pady=(2, 0))
         tk.Label(hrow, text="", bg=PANEL, width=20, anchor="w").pack(side="left")
-        tk.Label(hrow, text="Map", bg=PANEL, fg=DIM,
-                 font=("Segoe UI", 8), width=4).pack(side="left")
+        # Map is on the right → its checkbox header is on the right
+        tk.Label(hrow, text="Map",   bg=PANEL, fg=DIM,
+                 font=("Segoe UI", 8), width=4).pack(side="right")
         tk.Label(hrow, text="Focus", bg=PANEL, fg=DIM,
-                 font=("Segoe UI", 8), width=5).pack(side="left")
+                 font=("Segoe UI", 8), width=5).pack(side="right")
 
         for gname, subgroups in GROUPS_CONFIG:
             all_cats_in_group = [ck for _, cks in subgroups for ck in cks]
@@ -681,19 +703,21 @@ class App(tk.Tk):
 
         self.after(100, self._sf.bind_all_children)
 
-        # Bottom bar: status + settings gear
+        # ── Bottom bar: status (full-width) + settings gear ──────────────
         tk.Frame(p, bg=BORDER, height=1).pack(fill="x")
         bot = tk.Frame(p, bg=PANEL2)
         bot.pack(fill="x")
-        self.status = tk.StringVar(value="Ready")
-        tk.Label(bot, textvariable=self.status, bg=PANEL2, fg=DIM,
-                 font=("Segoe UI", 9), padx=10, pady=5,
-                 anchor="w").pack(side="left", fill="x", expand=True)
         tk.Button(bot, text="\u2699", bg=PANEL2, fg=ACCENT, bd=0,
                   font=("Segoe UI", 13), padx=8, pady=3,
                   activebackground=BDR2, activeforeground=ACCENT,
                   relief="flat", cursor="hand2",
                   command=self._open_settings).pack(side="right")
+        self.status = tk.StringVar(value="Ready")
+        # Status label below settings row — wraps and never pushes the gear icon
+        tk.Label(bot, textvariable=self.status, bg=PANEL2, fg=DIM,
+                 font=("Segoe UI", 9), padx=8, pady=4,
+                 anchor="w", justify="left",
+                 wraplength=240).pack(side="left", fill="x", expand=True)
 
     def _build_filter_group(self, parent, gname, subgroups, all_cats_in_group):
         grp_frame = tk.Frame(parent, bg=PANEL)
@@ -773,10 +797,11 @@ class App(tk.Tk):
                         self._filter_changed()
                     return fn
 
-                flat_btn(sub_row, "ALL",  make_sub_all(cat_keys),
-                         fg=DIM, bg=PANEL, padx=3, pady=1,
-                         font=("Segoe UI", 7)).pack(side="right", padx=1)
+                # Pack Map first → rightmost; NONE pack second → left of ALL
                 flat_btn(sub_row, "NONE", make_sub_none(cat_keys),
+                         fg=DIM, bg=PANEL, padx=3, pady=1,
+                         font=("Segoe UI", 7)).pack(side="right", padx=(1, 0))
+                flat_btn(sub_row, "ALL",  make_sub_all(cat_keys),
                          fg=DIM, bg=PANEL, padx=3, pady=1,
                          font=("Segoe UI", 7)).pack(side="right", padx=1)
 
@@ -803,13 +828,13 @@ class App(tk.Tk):
                 cnt.pack(side="right", padx=(0, 2))
                 self._cnt_labels[cat] = cnt
 
-                # Focus checkbox (rightmost)
-                tk.Checkbutton(row, variable=vf, bg=PANEL, fg=DIM,
+                # Map checkbox → rightmost (Map panel is on the right)
+                tk.Checkbutton(row, variable=vm, bg=PANEL, fg=DIM,
                                selectcolor=PANEL2, activebackground=PANEL,
                                bd=0, highlightthickness=0,
                                command=self._filter_changed).pack(side="right")
-                # Map checkbox
-                tk.Checkbutton(row, variable=vm, bg=PANEL, fg=DIM,
+                # Focus checkbox → left of Map (Focus panel is on the left)
+                tk.Checkbutton(row, variable=vf, bg=PANEL, fg=DIM,
                                selectcolor=PANEL2, activebackground=PANEL,
                                bd=0, highlightthickness=0,
                                command=self._filter_changed).pack(side="right")
@@ -874,7 +899,7 @@ class App(tk.Tk):
         self._track_btn.pack(side="right", padx=(0, 4))
 
         # Scan Map button
-        flat_btn(tb, "\U0001F5FA  Scan Map  (Shift+M)", self._trigger_scan,
+        flat_btn(tb, "\U0001F5FA  Scan Map", self._trigger_scan,
                  font=("Segoe UI", 9), padx=10, pady=4,
                  bg=BTN_BG).pack(side="right", padx=(0, 4))
 
@@ -890,12 +915,47 @@ class App(tk.Tk):
         self.mc.bind("<Button-5>",        self._wheel)
         self.mc.bind("<Configure>",       lambda e: self._draw_map())
         self.mc.bind("<Motion>",          self._hover)
-        self.bind("<f>",         lambda e: self._fit())
-        self.bind("<F>",         lambda e: self._fit())
-        self.bind("<plus>",      lambda e: self._zoom_c(1.2))
-        self.bind("<minus>",     lambda e: self._zoom_c(0.83))
-        self.bind("<Shift-KeyPress-M>",  lambda e: self._trigger_scan())
-        self.bind("<Shift-KeyPress-m>",  lambda e: self._trigger_scan())
+        self._rebind_keys()
+
+    def _rebind_keys(self):
+        """Apply keybinds from settings.  Call after loading or changing keybinds."""
+        kb = self.cfg.get("keybinds", DEFAULTS["keybinds"])
+
+        def _bind_key(key_str, action):
+            """Parse a user-friendly key string like 'Shift+M' or 'f' and bind it."""
+            if not key_str:
+                return
+            parts  = key_str.split("+")
+            mods   = "-".join(p.capitalize() for p in parts[:-1])
+            k      = parts[-1]
+            # Map common non-obvious names to tkinter event names
+            name_map = {"=": "equal"}
+            k = name_map.get(k.lower(), k)
+            if mods:
+                spec = f"<{mods}-KeyPress-{k}>"
+            else:
+                spec = f"<KeyPress-{k}>"
+            try:
+                self.bind(spec, lambda e, a=action: a())
+                # Also bind the lowercase version for single letters
+                if len(k) == 1 and k.isalpha() and k == k.upper():
+                    self.bind(f"<KeyPress-{k.lower()}>", lambda e, a=action: a())
+            except tk.TclError:
+                pass
+
+        # Unbind previous scan-map keys
+        for ev in ("<Shift-KeyPress-M>", "<Shift-KeyPress-m>",
+                   "<KeyPress-f>", "<KeyPress-F>",
+                   "<KeyPress-plus>", "<KeyPress-minus>"):
+            try:
+                self.unbind(ev)
+            except Exception:
+                pass
+
+        _bind_key(kb.get("scan_map", ""), self._trigger_scan)
+        _bind_key(kb.get("fit",      ""), self._fit)
+        _bind_key(kb.get("zoom_in",  ""), lambda: self._zoom_c(1.2))
+        _bind_key(kb.get("zoom_out", ""), lambda: self._zoom_c(0.83))
 
     # ── Settings popup ────────────────────────────────────
     def _open_settings(self):
@@ -908,8 +968,8 @@ class App(tk.Tk):
         self._settings_win = win
         win.title("Settings")
         win.configure(bg=PANEL)
-        win.resizable(False, False)
-        win.geometry("400x360")
+        win.resizable(True, True)
+        win.geometry("420x540")
         win.transient(self)
 
         tk.Label(win, text="\u2699  Settings", bg=PANEL, fg=ACCENT,
@@ -949,10 +1009,52 @@ class App(tk.Tk):
 
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=8)
 
+        # ── Keybind section ───────────────────────────────
+        tk.Label(body, text="KEYBINDS", bg=PANEL, fg=DIM2,
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(0, 4))
+        tk.Label(body, text="Enter key name (e.g. 'f', 'Shift+M', 'plus').  "
+                            "Leave blank to disable.",
+                 bg=PANEL, fg=DIM, font=("Segoe UI", 8),
+                 wraplength=380, justify="left", anchor="w").pack(fill="x")
+
+        kb = self.cfg.setdefault("keybinds", dict(DEFAULTS["keybinds"]))
+        _kb_labels = [
+            ("Scan Map",   "scan_map"),
+            ("Fit View",   "fit"),
+            ("Zoom In",    "zoom_in"),
+            ("Zoom Out",   "zoom_out"),
+        ]
+        _kb_vars: dict[str, tk.StringVar] = {}
+        for lbl_txt, kb_key in _kb_labels:
+            kr = tk.Frame(body, bg=PANEL)
+            kr.pack(fill="x", pady=3)
+            tk.Label(kr, text=lbl_txt, bg=PANEL, fg=TEXT,
+                     font=("Segoe UI", 10), width=12, anchor="w").pack(side="left")
+            kv = tk.StringVar(value=kb.get(kb_key, ""))
+            _kb_vars[kb_key] = kv
+            ent = tk.Entry(kr, textvariable=kv, bg=PANEL2, fg=TEXT,
+                           insertbackground=TEXT, bd=0, font=("Segoe UI", 10),
+                           width=16)
+            ent.pack(side="left", padx=4)
+            flat_btn(kr, "Clear", lambda kk=kb_key, vv=kv: (vv.set(""), None),
+                     fg=DIM, bg=PANEL2, padx=6, pady=2,
+                     font=("Segoe UI", 8)).pack(side="left", padx=2)
+
+        def _save_keybinds():
+            for kk, vv in _kb_vars.items():
+                kb[kk] = vv.get().strip()
+            self.cfg["keybinds"] = kb
+            save_settings(self.cfg)
+            self._rebind_keys()
+
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=8)
+
         btn_row = tk.Frame(body, bg=PANEL)
         btn_row.pack(fill="x")
         flat_btn(btn_row, "Reset to Defaults", self._reset,
                  fg=DIM, bg=PANEL2, padx=10, pady=4).pack(side="left")
+        flat_btn(btn_row, "Save Keybinds", _save_keybinds,
+                 fg=TEXT, bg=BTN_BG, padx=10, pady=4).pack(side="left", padx=4)
         flat_btn(btn_row, "Close", win.destroy,
                  fg="#111", bg=ACCENT, padx=14, pady=4).pack(side="right")
 
@@ -1063,7 +1165,7 @@ class App(tk.Tk):
         self._draw_map()
 
     def _reset(self):
-        self.cfg = {**DEFAULTS}
+        self.cfg = {**DEFAULTS, "keybinds": dict(DEFAULTS["keybinds"])}
         for a, v in self._spins.items():
             v.set(DEFAULTS[a])
         if hasattr(self, "lblvar"):
@@ -1076,6 +1178,7 @@ class App(tk.Tk):
         _icon_img_cache.clear()
         self._map_dirty = True
         save_settings(self.cfg)
+        self._rebind_keys()
         self._draw_map()
         self._draw_focus()
 
