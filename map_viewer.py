@@ -3,9 +3,12 @@
 Dark and Darker – Map Viewer (Desktop)
 Run:  python map_viewer.py
 Requires: pip install Pillow
+
+Optional (for map scanner + minimap tracker):
+  pip install Pillow mss numpy
 """
 
-import json, math, sys, tkinter as tk
+import json, math, re, sys, threading, time, tkinter as tk
 from tkinter import ttk
 from pathlib import Path
 from collections import Counter
@@ -15,10 +18,32 @@ except ImportError:
     print("[!] Pillow not installed.  Run:  pip install Pillow")
     sys.exit(1)
 
+# Optional: ImageGrab for screenshots (works on Windows/macOS)
+try:
+    from PIL import ImageGrab
+    _HAVE_IMAGEGRAB = True
+except ImportError:
+    _HAVE_IMAGEGRAB = False
+
+# Optional: numpy for fast template matching
+try:
+    import numpy as np
+    _HAVE_NUMPY = True
+except ImportError:
+    _HAVE_NUMPY = False
+
+# Optional: mss for cross-platform screen capture
+try:
+    import mss as _mss_mod
+    _HAVE_MSS = True
+except ImportError:
+    _HAVE_MSS = False
+
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
 RAW     = DATA / "raw"
 MODULES = DATA / "modules"
+ICONS   = DATA / "icons"
 
 # ── Palette ───────────────────────────────────────────────
 BG      = "#0f0d0b"
@@ -331,6 +356,94 @@ def get_tile_img(map_name, mod_key, px):
     return img
 
 
+# ── Per-item icon system ──────────────────────────────────
+_icon_index: dict = {}   # lower_stem -> actual_stem (built on first use)
+
+
+def _build_icon_index():
+    """Build case-insensitive index of available icons."""
+    global _icon_index
+    if _icon_index:
+        return
+    if ICONS.is_dir():
+        for p in ICONS.iterdir():
+            if p.suffix.lower() == ".png":
+                _icon_index[p.stem.lower()] = p.stem
+
+
+def _find_icon_stem(object_name: str):
+    """Return the icon file stem for *object_name* using multiple fallback patterns.
+    Returns None when no icon can be found."""
+    _build_icon_index()
+    if not object_name:
+        return None
+
+    # Build ordered candidate list
+    cands = [object_name]
+
+    # Strip known variant suffixes (underwater / difficulty variants)
+    for sfx in ("_UnderSea", "_Hard", "_Nightmare"):
+        if object_name.endswith(sfx):
+            cands.append(object_name[: -len(sfx)])
+
+    # Id_Monster_XXX_Tier  →  try  Id_Monster_XXX_Common  +  ID_Lootdrop_Drop_XXX
+    m = re.match(
+        r"Id_Monster_(.+?)_(?:Common|Elite|Hard|Nightmare|Unique)$", object_name, re.I
+    )
+    if m:
+        name = m.group(1)
+        cands.append(f"Id_Monster_{name}_Common")
+        cands.append(f"ID_Lootdrop_Drop_{name}")
+
+    # Strip trailing _<number>  (e.g. Id_Props_Hoard01_5 → Id_Props_Hoard01)
+    base = re.sub(r"_\d+$", "", object_name)
+    if base != object_name:
+        cands.append(base)
+        for sfx in ("_UnderSea", "_Hard"):
+            if base.endswith(sfx):
+                cands.append(base[: -len(sfx)])
+
+    # BP_XXX_C_N  →  try BP_XXX_C_0 / BP_XXX_C_1 / BP_XXX_0
+    m2 = re.match(r"(BP_.+?)_C_\d+$", object_name)
+    if m2:
+        bp = m2.group(1)
+        cands.extend([f"{bp}_C_0", f"{bp}_C_1", f"{bp}_0"])
+
+    # Also try without the _C_ portion entirely
+    m3 = re.match(r"(BP_.+?)_C$", object_name)
+    if m3:
+        cands.append(f"{m3.group(1)}_0")
+
+    for c in cands:
+        stem = _icon_index.get(c.lower())
+        if stem:
+            return stem
+    return None
+
+
+_icon_img_cache: dict = {}   # "{object_name}/{size}" -> Image | None
+
+
+def get_item_icon(object_name: str, size: int):
+    """Return a *size×size* RGBA PIL Image for *object_name*, or None."""
+    k = f"{object_name}/{size}"
+    if k in _icon_img_cache:
+        return _icon_img_cache[k]
+    stem = _find_icon_stem(object_name)
+    img  = None
+    if stem:
+        p = ICONS / f"{stem}.png"
+        if p.exists():
+            try:
+                if _is_png_file(p):
+                    raw = Image.open(p).convert("RGBA")
+                    img = raw.resize((size, size), Image.LANCZOS)
+            except Exception:
+                img = None
+    _icon_img_cache[k] = img
+    return img
+
+
 def render_tile(map_name, mod_key, mod, tile_px, visible, mscale):
     span = mod["span"]
     W = H = span * tile_px
@@ -339,7 +452,8 @@ def render_tile(map_name, mod_key, mod, tile_px, visible, mscale):
     bb   = mod["bbox"]
     xr   = bb["xmax"] - bb["xmin"] or 1
     yr   = bb["ymax"] - bb["ymin"] or 1
-    for item in mod["items"]:
+    for item in sorted(mod["items"],
+                       key=lambda i: CATS.get(i["cat"], {}).get("pri", 0)):
         cat = item["cat"]
         cfg = CATS.get(cat)
         if not cfg or cat not in visible:
@@ -348,13 +462,30 @@ def render_tile(map_name, mod_key, mod, tile_px, visible, mscale):
         py2 = ((bb["ymax"] - item["y"]) / yr) * H
         r   = max(2, int(cfg["r"] * mscale))
         rc  = hex_rgb(cfg["color"])
-        if cfg["ring"]:
-            rr = r + max(2, int(4 * mscale))
-            draw.ellipse([px2-rr, py2-rr, px2+rr, py2+rr],
-                         outline=(*rc, 90), width=max(1, int(1.5*mscale)))
-        draw.ellipse([px2-r, py2-r, px2+r, py2+r],
-                     fill=(*rc, 235), outline=(0, 0, 0, 200),
-                     width=max(1, int(mscale)))
+
+        # Icon diameter = 2× marker radius (minimum 12 px for readability)
+        icon_d  = max(12, r * 2)
+        icon_img = get_item_icon(item["id"], icon_d)
+
+        if icon_img is not None:
+            # Optional ring for important categories
+            if cfg["ring"]:
+                rr = r + max(2, int(3 * mscale))
+                draw.ellipse([px2 - rr, py2 - rr, px2 + rr, py2 + rr],
+                             outline=(*rc, 110), width=max(1, int(1.5 * mscale)))
+            # Paste icon centred on the marker position
+            ix = int(px2 - icon_d / 2)
+            iy = int(py2 - icon_d / 2)
+            img.paste(icon_img, (ix, iy), icon_img)
+        else:
+            # Fallback: coloured circle
+            if cfg["ring"]:
+                rr = r + max(2, int(4 * mscale))
+                draw.ellipse([px2 - rr, py2 - rr, px2 + rr, py2 + rr],
+                             outline=(*rc, 90), width=max(1, int(1.5 * mscale)))
+            draw.ellipse([px2 - r, py2 - r, px2 + r, py2 + r],
+                         fill=(*rc, 235), outline=(0, 0, 0, 200),
+                         width=max(1, int(mscale)))
     return img
 
 
@@ -429,10 +560,30 @@ class App(tk.Tk):
         self._fvars_focus  = {}
         self._cnt_labels   = {}
         self._spins        = {}
+
+        # ── Composite cache (performance) ─────────────────
+        self._map_composite: Image.Image | None = None
+        self._map_comp_params = None   # (tp, ms, focus_key) when last built
+        self._map_comp_zoom   = 0.0
+        self._map_comp_scaled: Image.Image | None = None
+        self._map_comp_tk     = None
+        self._map_comp_id     = None   # canvas item id
+        self._map_dirty       = True
+
+        # ── Player tracker ────────────────────────────────
+        self._tracker: MinimapTracker | None = None
+        self._player_map_pos = None      # (world_x, world_y) of player
+        self._player_angle   = 0.0       # degrees, 0=north
+        self._track_btn_var  = tk.BooleanVar(value=False)
+
+        # ── Scanner ───────────────────────────────────────
+        self._scanner: MapScanner | None = None
+
         self._build()
         self._populate_maps()
         self.map_var.set("")
         self.status.set("Select a map to load.")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Build UI ──────────────────────────────────────────
     def _build(self):
@@ -707,6 +858,26 @@ class App(tk.Tk):
                              font=("Segoe UI", 9))
         self.zlbl.pack(side="left")
 
+        # ── Scanner & tracker buttons (right side of toolbar) ─
+        tk.Frame(tb, bg=BDR2, width=1).pack(side="right", fill="y", padx=6)
+
+        # Track Player toggle
+        self._track_lbl_var = tk.StringVar(value="\U0001F9ED  Track OFF")
+        self._track_btn = tk.Button(
+            tb, textvariable=self._track_lbl_var,
+            command=self._toggle_tracker,
+            bg=BTN_BG, fg=DIM, bd=0,
+            font=("Segoe UI", 9), padx=10, pady=4,
+            activebackground=BTN_HOV, activeforeground=TEXT,
+            relief="flat", cursor="hand2",
+        )
+        self._track_btn.pack(side="right", padx=(0, 4))
+
+        # Scan Map button
+        flat_btn(tb, "\U0001F5FA  Scan Map  (Shift+M)", self._trigger_scan,
+                 font=("Segoe UI", 9), padx=10, pady=4,
+                 bg=BTN_BG).pack(side="right", padx=(0, 4))
+
         tk.Frame(p, bg=BORDER, height=1).pack(fill="x")
 
         self.mc = tk.Canvas(p, bg=BG, bd=0, highlightthickness=0, cursor="fleur")
@@ -719,10 +890,12 @@ class App(tk.Tk):
         self.mc.bind("<Button-5>",        self._wheel)
         self.mc.bind("<Configure>",       lambda e: self._draw_map())
         self.mc.bind("<Motion>",          self._hover)
-        self.bind("<f>", lambda e: self._fit())
-        self.bind("<F>", lambda e: self._fit())
-        self.bind("<plus>",  lambda e: self._zoom_c(1.2))
-        self.bind("<minus>", lambda e: self._zoom_c(0.83))
+        self.bind("<f>",         lambda e: self._fit())
+        self.bind("<F>",         lambda e: self._fit())
+        self.bind("<plus>",      lambda e: self._zoom_c(1.2))
+        self.bind("<minus>",     lambda e: self._zoom_c(0.83))
+        self.bind("<Shift-KeyPress-M>",  lambda e: self._trigger_scan())
+        self.bind("<Shift-KeyPress-m>",  lambda e: self._trigger_scan())
 
     # ── Settings popup ────────────────────────────────────
     def _open_settings(self):
@@ -800,6 +973,7 @@ class App(tk.Tk):
             self.status.set(f"No data for {name}. Run dad_downloader.py first.")
             return
         _img_cache.clear()
+        _icon_img_cache.clear()
         self.status.set(f"Loading {name}\u2026")
         self.update_idletasks()
         mode = self.mode_var.get()
@@ -818,6 +992,9 @@ class App(tk.Tk):
         for mk in self._mk_order:
             self.mod_list.insert("end", self.modules[mk].get("label", mk))
 
+        self._map_dirty = True
+        self._map_composite = None
+        self._player_map_pos = None
         self._update_counts()
         self._draw_map()
         self._fit()
@@ -833,7 +1010,8 @@ class App(tk.Tk):
         idx = sel[0]
         if idx < len(self._mk_order):
             self.focus_key = self._mk_order[idx]
-            # Highlight on big map WITHOUT re-centering it
+            # Highlight on big map; mark dirty so the highlight ring is rebuilt
+            self._map_dirty = True
             self._draw_map()
             self._draw_focus()
             self.after(FOCUS_RENDER_DELAY_MS, self._draw_focus)
@@ -845,6 +1023,7 @@ class App(tk.Tk):
         self.cfg["visible_cats_map"]   = list(self.visible_map)
         self.cfg["visible_cats_focus"] = list(self.visible_focus)
         save_settings(self.cfg)
+        self._map_dirty = True
         self._draw_map()
         self._draw_focus()
 
@@ -871,6 +1050,8 @@ class App(tk.Tk):
         except Exception:
             return
         _img_cache.clear()
+        _icon_img_cache.clear()
+        self._map_dirty = True
         save_settings(self.cfg)
         self._draw_map()
         if self.focus_key:
@@ -892,6 +1073,8 @@ class App(tk.Tk):
         for c, v in self._fvars_map.items():   v.set(c in self.visible_map)
         for c, v in self._fvars_focus.items(): v.set(c in self.visible_focus)
         _img_cache.clear()
+        _icon_img_cache.clear()
+        self._map_dirty = True
         save_settings(self.cfg)
         self._draw_map()
         self._draw_focus()
@@ -903,41 +1086,108 @@ class App(tk.Tk):
     def _mscale(self):
         return float(self.cfg.get("marker_scale", 1.0))
 
+    # ── Static map composite ──────────────────────────────
+    def _rebuild_map_composite(self):
+        """Render every module tile into a single static PIL Image.
+
+        This composite is rebuilt only when map content changes (filter/map
+        reload/focus change).  Pan and zoom just reposition/resize this one
+        image – avoiding per-tile re-render on every mouse drag.
+        """
+        if not self.modules:
+            self._map_composite = None
+            return
+        tp = self._tile_px()
+        ms = self._mscale()
+        mc = max(m["col"] + m["span"] for m in self.modules.values())
+        mr = max(m["row"] + m["span"] for m in self.modules.values())
+        W  = mc * tp
+        H  = mr * tp
+        composite = Image.new("RGBA", (W, H), (15, 13, 11, 255))
+        for mk, mod in self.modules.items():
+            span   = mod["span"]
+            tile_w = span * tp
+            wx     = mod["col"] * tp
+            wy     = mod["row"] * tp
+            tile   = render_tile(self._cur_map, mk, mod, tp, self.visible_map, ms)
+            if mk == self.focus_key:
+                d = ImageDraw.Draw(tile)
+                d.rectangle([0, 0, tile_w - 1, tile_w - 1],
+                             outline=(200, 168, 75, 255), width=3)
+            composite.paste(tile, (wx, wy))
+        self._map_composite     = composite
+        self._map_comp_params   = (tp, ms, self.focus_key)
+        self._map_comp_zoom     = 0.0    # force re-scale on next draw
+        self._map_comp_scaled   = None
+        self._map_comp_tk       = None
+        self._map_comp_id       = None
+        self._map_dirty         = False
+
     def _draw_map(self, *_):
         c = self.mc
-        c.delete("all")
-        self._tkimgs.clear()
         if not self.modules:
+            c.delete("all")
+            self._tkimgs.clear()
+            self._map_comp_id = None
             c.create_text(c.winfo_width() // 2, c.winfo_height() // 2,
                           text="No map data loaded.\nRun dad_downloader.py first.",
                           fill=DIM, font=("Segoe UI", 13), justify="center")
             return
-        tp       = self._tile_px()
-        ms       = self._mscale()
+
+        tp = self._tile_px()
+        ms = self._mscale()
+
+        # Rebuild composite when content changed
+        cur_params = (tp, ms, self.focus_key)
+        if self._map_dirty or self._map_composite is None or \
+                self._map_comp_params != cur_params:
+            self._rebuild_map_composite()
+
+        if self._map_composite is None:
+            return
+
+        # Rescale if zoom changed
+        if abs(self._map_comp_zoom - self._zoom) > 1e-6 or \
+                self._map_comp_scaled is None:
+            cw, ch   = self._map_composite.size
+            sw       = max(1, int(cw * self._zoom))
+            sh       = max(1, int(ch * self._zoom))
+            method   = Image.NEAREST if self._zoom < 0.4 else Image.BILINEAR
+            self._map_comp_scaled = self._map_composite.resize((sw, sh), method)
+            self._map_comp_tk     = ImageTk.PhotoImage(self._map_comp_scaled)
+            self._map_comp_zoom   = self._zoom
+            self._map_comp_id     = None   # force canvas item recreation
+
+        # (Re)create canvas item when the PhotoImage was replaced
+        if self._map_comp_id is None:
+            c.delete("all")
+            self._tkimgs = [self._map_comp_tk]
+            self._map_comp_id = c.create_image(
+                self._panx, self._pany, anchor="nw",
+                image=self._map_comp_tk, tags=("COMPOSITE",))
+        else:
+            # Just reposition
+            c.coords(self._map_comp_id, self._panx, self._pany)
+
+        # Draw module labels on top (fast text ops)
+        c.delete("LABEL")
         show_lbl = self.cfg.get("show_labels", True)
-        for mk, mod in self.modules.items():
-            span = mod["span"]
-            W    = span * tp
-            wx   = mod["col"] * tp
-            wy   = mod["row"] * tp
-            img  = render_tile(self._cur_map, mk, mod, tp, self.visible_map, ms)
-            sw   = max(1, int(W * self._zoom))
-            sh   = sw
-            rmethod = Image.NEAREST if self._zoom < 0.4 else Image.BILINEAR
-            imgs = img.resize((sw, sh), rmethod)
-            if mk == self.focus_key:
-                d = ImageDraw.Draw(imgs)
-                d.rectangle([0, 0, sw-1, sh-1], outline=(200, 168, 75, 255), width=3)
-            ti = ImageTk.PhotoImage(imgs)
-            self._tkimgs.append(ti)
-            cx = wx * self._zoom + self._panx
-            cy = wy * self._zoom + self._pany
-            c.create_image(cx, cy, anchor="nw", image=ti, tags=(f"T:{mk}",))
-            if show_lbl and sw > 40:
-                fs = max(7, min(11, int(8 * self._zoom)))
-                c.create_text(cx + sw // 2, cy + sh - max(2, int(8 * self._zoom)),
-                              text=mod.get("label", mk), fill="white",
-                              font=("Segoe UI", fs), anchor="s")
+        if show_lbl:
+            for mk, mod in self.modules.items():
+                span   = mod["span"]
+                tile_w = span * tp * self._zoom
+                wx     = mod["col"] * tp * self._zoom + self._panx
+                wy     = mod["row"] * tp * self._zoom + self._pany
+                if tile_w > 40:
+                    fs = max(7, min(11, int(8 * self._zoom)))
+                    c.create_text(
+                        wx + tile_w // 2,
+                        wy + tile_w - max(2, int(8 * self._zoom)),
+                        text=mod.get("label", mk), fill="white",
+                        font=("Segoe UI", fs), anchor="s", tags=("LABEL",))
+
+        # Player overlay
+        self._draw_player_overlay()
         self.zlbl.config(text=f"{int(self._zoom * 100)}%")
 
     def _draw_focus(self, *_):
@@ -1010,9 +1260,15 @@ class App(tk.Tk):
             return
         dx = e.x - self._drag[0]
         dy = e.y - self._drag[1]
-        self._panx = self._drag[2] + dx
-        self._pany = self._drag[3] + dy
-        self._draw_map()
+        new_panx = self._drag[2] + dx
+        new_pany = self._drag[3] + dy
+        # Incremental delta for moving canvas items
+        ddx = new_panx - self._panx
+        ddy = new_pany - self._pany
+        self._panx = new_panx
+        self._pany = new_pany
+        # Move all canvas items together – no re-rendering, no resize
+        self.mc.move("all", ddx, ddy)
 
     def _drag_end(self, e):
         self._drag = None
@@ -1020,6 +1276,154 @@ class App(tk.Tk):
     def _wheel(self, e):
         f = 1.1 if (getattr(e, "delta", 0) > 0 or e.num == 4) else 0.91
         self._zoom_at(f, e.x, e.y)
+
+    # ── Player position overlay ───────────────────────────
+    def _draw_player_overlay(self):
+        """Draw player arrow on the map canvas (non-blocking, fast)."""
+        c = self.mc
+        c.delete("PLAYER")
+        if not self._player_map_pos or not self.modules:
+            return
+        tp = self._tile_px()
+        wx_world, wy_world = self._player_map_pos
+        # Find which module contains this world position
+        cur_mod = None
+        for mk, mod in self.modules.items():
+            bb   = mod["bbox"]
+            xmin, xmax = bb["xmin"], bb["xmax"]
+            ymin, ymax = bb["ymin"], bb["ymax"]
+            if xmin <= wx_world <= xmax and ymin <= wy_world <= ymax:
+                cur_mod = mk
+                span   = mod["span"]
+                W      = span * tp
+                ox     = mod["col"] * tp
+                oy     = mod["row"] * tp
+                xr     = (xmax - xmin) or 1
+                yr     = (ymax - ymin) or 1
+                cx     = ox + ((wx_world - xmin) / xr) * W
+                cy     = oy + ((ymax - wy_world) / yr) * W
+                break
+        if cur_mod is None:
+            return
+        # Convert to canvas coords
+        sx = cx * self._zoom + self._panx
+        sy = cy * self._zoom + self._pany
+        r  = max(6, int(10 * self._zoom))
+        # Draw player circle
+        c.create_oval(sx - r, sy - r, sx + r, sy + r,
+                      fill="#3af", outline="white", width=2, tags=("PLAYER",))
+        # Direction triangle
+        ang = math.radians(self._player_angle)
+        tip_x = sx + math.sin(ang)  * (r + 6)
+        tip_y = sy - math.cos(ang)  * (r + 6)
+        lx    = sx - math.cos(ang)  * (r * 0.5)
+        ly    = sy - math.sin(ang)  * (r * 0.5)
+        rx    = sx + math.cos(ang)  * (r * 0.5)
+        ry    = sy + math.sin(ang)  * (r * 0.5)
+        c.create_polygon(tip_x, tip_y, lx, ly, rx, ry,
+                         fill="white", outline="#3af", width=1, tags=("PLAYER",))
+        # Highlight the current module in the listbox
+        if hasattr(self, "_mk_order") and cur_mod in self._mk_order:
+            idx = self._mk_order.index(cur_mod)
+            self.mod_list.selection_clear(0, "end")
+            self.mod_list.selection_set(idx)
+            self.mod_list.see(idx)
+
+    def _update_player_pos(self, world_pos, angle_deg):
+        """Called by MinimapTracker to push a new player position (thread-safe)."""
+        self._player_map_pos = world_pos
+        self._player_angle   = angle_deg
+        # Schedule a lightweight redraw of just the player overlay
+        self.after_idle(self._redraw_player_only)
+
+    def _redraw_player_only(self):
+        self.mc.delete("PLAYER")
+        self._draw_player_overlay()
+
+    # ── Map scanner (Shift+M) ─────────────────────────────
+    def _trigger_scan(self):
+        if not _HAVE_IMAGEGRAB and not _HAVE_MSS:
+            self.status.set("[Scan] Screenshot not available – install Pillow[ImageGrab] or mss.")
+            return
+        map_name = self._cur_map_name()
+        if not map_name:
+            self.status.set("[Scan] Load a map first, then press Shift+M.")
+            return
+        self.status.set("\U0001F5FA  Scanning screen\u2026  (Shift+M)")
+        self.update_idletasks()
+        try:
+            scanner = MapScanner(map_name, self.manifest, self.modules)
+            result  = scanner.scan()
+        except Exception as exc:
+            self.status.set(f"[Scan] Error: {exc}")
+            return
+        if result is None:
+            self.status.set("[Scan] Could not detect dungeon map on screen. "
+                            "Open your in-game map first.")
+            return
+        # result = {"layout": {mk: (row, col, rotation)}, "map_name": str}
+        self._apply_scan_result(result)
+
+    def _apply_scan_result(self, result):
+        """Apply scanner layout to the viewer."""
+        layout   = result.get("layout", {})
+        new_mods = {}
+        for mk, (row, col, rot) in layout.items():
+            if mk in self.modules:
+                m        = dict(self.modules[mk])
+                m["row"] = row
+                m["col"] = col
+                new_mods[mk] = m
+        if not new_mods:
+            self.status.set("[Scan] No matching modules found.")
+            return
+        self.modules   = new_mods
+        self._map_dirty = True
+        self.mod_list.delete(0, "end")
+        self._mk_order = sorted(new_mods,
+                                key=lambda k: (new_mods[k]["row"],
+                                               new_mods[k]["col"]))
+        for mk in self._mk_order:
+            self.mod_list.insert("end", new_mods[mk].get("label", mk))
+        self._update_counts()
+        self._draw_map()
+        self._fit()
+        self.status.set(f"[Scan] Layout applied  \u2022  {len(new_mods)} modules matched.")
+
+    # ── Minimap tracker ───────────────────────────────────
+    def _toggle_tracker(self):
+        if self._tracker and self._tracker.running:
+            self._tracker.stop()
+            self._tracker = None
+            self._track_lbl_var.set("\U0001F9ED  Track OFF")
+            self._track_btn.config(fg=DIM)
+            self.mc.delete("PLAYER")
+            self.status.set("Player tracking stopped.")
+        else:
+            if not (_HAVE_IMAGEGRAB or _HAVE_MSS):
+                self.status.set("[Track] Install mss or Pillow[ImageGrab] for tracking.")
+                return
+            mm_cfg = {
+                "left":   self.cfg.get("minimap_left",   1700),
+                "top":    self.cfg.get("minimap_top",    860),
+                "width":  self.cfg.get("minimap_width",  200),
+                "height": self.cfg.get("minimap_height", 200),
+            }
+            self._tracker = MinimapTracker(
+                minimap_region=mm_cfg,
+                callback=self._update_player_pos,
+                modules=self.modules,
+            )
+            self._tracker.start()
+            self._track_lbl_var.set("\U0001F9ED  Track ON")
+            self._track_btn.config(fg=ACCENT)
+            self.status.set("Player tracking active  \u2022  move on minimap to update.")
+
+    def _on_close(self):
+        if self._tracker:
+            self._tracker.stop()
+        save_settings(self.cfg)
+        self.destroy()
 
     # ── Hover tooltip ─────────────────────────────────────
     def _hover(self, e):
@@ -1073,8 +1477,332 @@ class App(tk.Tk):
             self._tt_win = None
 
     def destroy(self):
+        if self._tracker:
+            self._tracker.stop()
         save_settings(self.cfg)
         super().destroy()
+
+
+# ── Map Scanner ───────────────────────────────────────────
+class MapScanner:
+    """Capture the screen and match visible dungeon modules using template matching.
+
+    The algorithm:
+    1. Take a screenshot of the full screen (or configured region).
+    2. Locate the dungeon-map overlay by looking for the characteristic
+       dark area surrounded by UI chrome.
+    3. For every cell in the module grid, extract a patch and compare it
+       (using normalised mean-squared-error) against all four rotations of
+       every known module PNG.  The best match wins.
+    4. Return a ``layout`` dict: {module_key: (row, col, rotation_deg)}.
+
+    Requires either ``PIL.ImageGrab`` (Windows/macOS) or ``mss``
+    (cross-platform).  Works best with ``numpy`` installed.
+    """
+
+    # Dungeon-map detection: look for large dark rectangle
+    # These heuristics are tuned for 1080p – scale with screen size.
+    _MAP_DARK_THRESHOLD  = 50   # max average brightness of map background
+    _MATCH_THRESHOLD     = 0.35  # max normalised MSE to accept a match
+
+    def __init__(self, map_name: str, manifest: dict, current_modules: dict):
+        self.map_name        = map_name
+        self.manifest        = manifest
+        self.current_modules = current_modules
+
+    # ── Screenshot helpers ────────────────────────────────
+    @staticmethod
+    def _grab_screen() -> "Image.Image | None":
+        """Return a full-screen RGB screenshot, or None on failure."""
+        if _HAVE_MSS:
+            try:
+                with _mss_mod.mss() as sct:
+                    monitor = sct.monitors[1]   # primary monitor
+                    raw     = sct.grab(monitor)
+                    return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+            except Exception:
+                pass
+        if _HAVE_IMAGEGRAB:
+            try:
+                return ImageGrab.grab()
+            except Exception:
+                pass
+        return None
+
+    # ── Dungeon-map area detection ────────────────────────
+    @staticmethod
+    def _find_map_area(screen: "Image.Image") -> "tuple[int,int,int,int] | None":
+        """Return (x, y, w, h) of the dungeon-map overlay, or None.
+
+        Scans horizontal strips for a large region that is predominantly dark
+        (i.e. the dungeon-map background).  The dungeon map in Dark and Darker
+        occupies roughly the center of the screen as a dark square/rectangle.
+        """
+        sw, sh = screen.size
+        # Sample the centre 80 % of the screen to skip edge chrome
+        x0, y0 = int(sw * 0.1), int(sh * 0.1)
+        x1, y1 = int(sw * 0.9), int(sh * 0.9)
+        region  = screen.crop((x0, y0, x1, y1)).convert("L")
+
+        rw, rh = region.size
+        # Try square regions from the largest downwards
+        best = None
+        for size_frac in (0.75, 0.65, 0.55, 0.45):
+            side = int(min(rw, rh) * size_frac)
+            cx   = rw // 2 - side // 2
+            cy   = rh // 2 - side // 2
+            patch = region.crop((cx, cy, cx + side, cy + side))
+            avg   = sum(patch.getdata()) / (side * side)
+            if avg < MapScanner._MAP_DARK_THRESHOLD:
+                best = (x0 + cx, y0 + cy, side, side)
+                break
+        return best
+
+    # ── Module template loading ───────────────────────────
+    def _load_module_templates(self, patch_size: int
+                               ) -> "dict[str, list[Image.Image]]":
+        """Load all module PNGs for the current map at *patch_size* pixels.
+        Returns {mod_key: [rot0, rot90, rot180, rot270]}.
+        """
+        templates: dict = {}
+        mod_dir = MODULES / self.map_name
+        if not mod_dir.is_dir():
+            return templates
+        for mk in self.current_modules:
+            p = mod_dir / f"{mk}.png"
+            if not (p.exists() and _is_png_file(p)):
+                continue
+            try:
+                base = Image.open(p).convert("L").resize(
+                    (patch_size, patch_size), Image.LANCZOS)
+                rotations = [
+                    base,
+                    base.rotate(90,  expand=True).resize((patch_size, patch_size), Image.LANCZOS),
+                    base.rotate(180, expand=True).resize((patch_size, patch_size), Image.LANCZOS),
+                    base.rotate(270, expand=True).resize((patch_size, patch_size), Image.LANCZOS),
+                ]
+                templates[mk] = rotations
+            except Exception:
+                pass
+        return templates
+
+    # ── Normalised MSE comparison ─────────────────────────
+    @staticmethod
+    def _nmse(a: "Image.Image", b: "Image.Image") -> float:
+        """Normalised mean-squared error between two greyscale images [0..1]."""
+        if _HAVE_NUMPY:
+            aa = np.asarray(a, dtype=np.float32) / 255.0
+            bb = np.asarray(b, dtype=np.float32) / 255.0
+            return float(np.mean((aa - bb) ** 2))
+        # Pure-PIL fallback (slower)
+        da = list(a.getdata())
+        db = list(b.getdata())
+        n  = len(da)
+        if n == 0:
+            return 1.0
+        return sum((x - y) ** 2 for x, y in zip(da, db)) / (n * 255.0 ** 2)
+
+    # ── Main scan entry point ─────────────────────────────
+    def scan(self) -> "dict | None":
+        """Capture screen → detect map area → match modules → return layout."""
+        screen = self._grab_screen()
+        if screen is None:
+            return None
+
+        area = self._find_map_area(screen)
+        if area is None:
+            return None
+
+        ax, ay, aw, ah = area
+        map_img = screen.crop((ax, ay, ax + aw, ay + ah)).convert("L")
+
+        # Determine grid dimensions from known module layout
+        if not self.current_modules:
+            return None
+        max_col  = max(m["col"] + m["span"] for m in self.current_modules.values())
+        max_row  = max(m["row"] + m["span"] for m in self.current_modules.values())
+        patch_px = max(32, min(aw // max(max_col, 1), ah // max(max_row, 1)))
+
+        templates = self._load_module_templates(patch_px)
+        if not templates:
+            return None
+
+        layout: dict = {}
+        for mk, mod in self.current_modules.items():
+            if mk not in templates:
+                continue
+            row, col = mod["row"], mod["col"]
+            span     = mod["span"]
+            # Extract the corresponding patch from the screenshot
+            px0 = int(col * patch_px)
+            py0 = int(row * patch_px)
+            px1 = px0 + int(span * patch_px)
+            py1 = py0 + int(span * patch_px)
+            if px1 > map_img.width or py1 > map_img.height:
+                continue
+            patch = map_img.crop((px0, py0, px1, py1)).resize(
+                (patch_px, patch_px), Image.LANCZOS)
+
+            best_err = float("inf")
+            best_rot = 0
+            for rot_idx, tmpl in enumerate(templates[mk]):
+                err = self._nmse(patch, tmpl)
+                if err < best_err:
+                    best_err = err
+                    best_rot = rot_idx * 90
+
+            if best_err < self._MATCH_THRESHOLD:
+                layout[mk] = (row, col, best_rot)
+
+        if not layout:
+            return None
+        return {"layout": layout, "map_name": self.map_name}
+
+
+# ── Minimap Player Tracker ────────────────────────────────
+class MinimapTracker:
+    """Lightweight thread that captures a small screen region (the minimap)
+    and detects the player's position and facing direction.
+
+    Detection strategy
+    ------------------
+    * Capture *only* the minimap region (default: bottom-right ~200 × 200 px).
+      This is the smallest possible screenshot area – minimal CPU/memory cost.
+    * Convert to grayscale and find the brightest connected cluster of pixels.
+      In DnD the player arrow is the brightest element on the minimap.
+    * Calculate the cluster's centroid → player position in minimap space.
+    * Estimate facing angle from the cluster's axis of elongation.
+    * Map minimap position to world coordinates via the known module bboxes.
+
+    The tracker does *not* inject into the game process; it uses only passive
+    OS-level screen capture (PIL ImageGrab or mss).  This is safe with Iron
+    Shield and any other passive-read anticheat.
+    """
+
+    _INTERVAL_S     = 0.12    # ~8 FPS – lightweight
+    _BRIGHT_THRESH  = 200     # pixel brightness to count as "player"
+    _MIN_CLUSTER    = 4       # minimum bright pixels to accept as player
+
+    def __init__(self, minimap_region: dict, callback, modules: dict):
+        """
+        Parameters
+        ----------
+        minimap_region : dict with keys left, top, width, height (screen pixels)
+        callback       : callable(world_pos, angle_deg) called on main thread
+        modules        : current map modules dict
+        """
+        self._region   = minimap_region
+        self._callback = callback
+        self._modules  = modules
+        self._thread: threading.Thread | None = None
+        self._stop_evt = threading.Event()
+        self.running   = False
+        # Precompute minimap-to-world mapping once
+        self._build_world_bbox()
+
+    def _build_world_bbox(self):
+        """Find the overall world bounding-box from all module bboxes."""
+        if not self._modules:
+            self._world_bbox = None
+            return
+        xmin = min(m["bbox"]["xmin"] for m in self._modules.values())
+        xmax = max(m["bbox"]["xmax"] for m in self._modules.values())
+        ymin = min(m["bbox"]["ymin"] for m in self._modules.values())
+        ymax = max(m["bbox"]["ymax"] for m in self._modules.values())
+        self._world_bbox = (xmin, ymin, xmax, ymax)
+
+    # ── Screen capture ────────────────────────────────────
+    def _capture_minimap(self) -> "Image.Image | None":
+        r = self._region
+        box = (r["left"], r["top"],
+               r["left"] + r["width"], r["top"] + r["height"])
+        if _HAVE_MSS:
+            try:
+                with _mss_mod.mss() as sct:
+                    raw = sct.grab({
+                        "left": r["left"], "top": r["top"],
+                        "width": r["width"], "height": r["height"],
+                    })
+                    return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+            except Exception:
+                pass
+        if _HAVE_IMAGEGRAB:
+            try:
+                return ImageGrab.grab(bbox=box)
+            except Exception:
+                pass
+        return None
+
+    # ── Player detection ──────────────────────────────────
+    @staticmethod
+    def _find_player(minimap_gray: "Image.Image"
+                     ) -> "tuple[float, float, float] | None":
+        """Return (rel_x, rel_y, angle_deg) in [0..1] minimap coords, or None.
+
+        Uses a fast brightness threshold on the greyscale minimap.  The player
+        arrow is the brightest object; its centroid gives position and the
+        principal axis gives facing direction.
+        """
+        w, h   = minimap_gray.size
+        pixels = list(minimap_gray.getdata())
+        bright = [(i % w, i // w) for i, v in enumerate(pixels)
+                  if v >= MinimapTracker._BRIGHT_THRESH]
+        if len(bright) < MinimapTracker._MIN_CLUSTER:
+            return None
+        # Centroid
+        cx = sum(x for x, _ in bright) / len(bright)
+        cy = sum(y for _, y in bright) / len(bright)
+        # Principal axis via covariance (fast with pure Python)
+        mx = cx; my = cy
+        sxx = sum((x - mx) ** 2 for x, _ in bright)
+        syy = sum((y - my) ** 2 for _, y in bright)
+        sxy = sum((x - mx) * (y - my) for x, y in bright)
+        angle_rad = 0.5 * math.atan2(2 * sxy, sxx - syy) if (sxx + syy) else 0.0
+        return (cx / w, cy / h, math.degrees(angle_rad))
+
+    # ── World position mapping ────────────────────────────
+    def _minimap_to_world(self, rel_x: float, rel_y: float
+                          ) -> "tuple[float, float] | None":
+        """Map minimap-relative [0..1] coords to game-world coords."""
+        if not self._world_bbox:
+            return None
+        xmin, ymin, xmax, ymax = self._world_bbox
+        wx = xmin + rel_x * (xmax - xmin)
+        # Y is flipped (screen-space vs world-space)
+        wy = ymax - rel_y * (ymax - ymin)
+        return (wx, wy)
+
+    # ── Thread loop ───────────────────────────────────────
+    def _loop(self):
+        while not self._stop_evt.is_set():
+            t0 = time.monotonic()
+            try:
+                mm_img = self._capture_minimap()
+                if mm_img is not None:
+                    gray   = mm_img.convert("L")
+                    result = self._find_player(gray)
+                    if result is not None:
+                        rx, ry, ang = result
+                        world_pos   = self._minimap_to_world(rx, ry)
+                        if world_pos:
+                            self._callback(world_pos, ang)
+            except Exception:
+                pass
+            elapsed = time.monotonic() - t0
+            self._stop_evt.wait(max(0.0, self._INTERVAL_S - elapsed))
+
+    def start(self):
+        self._stop_evt.clear()
+        self.running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="MinimapTracker")
+        self._thread.start()
+
+    def stop(self):
+        self._stop_evt.set()
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
 
 
 if __name__ == "__main__":
