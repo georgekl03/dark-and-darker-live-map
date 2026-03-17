@@ -23,10 +23,11 @@ a standalone screen-scanner/debug toolset.
    - [Scan Map feature](#scan-map-feature)
    - [Player tracking](#player-tracking)
 5. [Map Scanner Debug Tool (`map_scanner.py`)](#map-scanner-debug-tool-map_scannerpy)
-6. [Minimap Tracker Debug Tool (`minimap_tracker.py`)](#minimap-tracker-debug-tool-minimap_trackerpy)
-7. [Data Downloader (`dad_downloader.py`)](#data-downloader-dad_downloaderpy)
-8. [Troubleshooting](#troubleshooting)
-9. [File / Folder Structure](#file--folder-structure)
+6. [Map Scanner V2 Debug Tool (`map_scanner_v2.py`)](#map-scanner-v2-debug-tool-map_scanner_v2py)
+7. [Minimap Tracker Debug Tool (`minimap_tracker.py`)](#minimap-tracker-debug-tool-minimap_trackerpy)
+8. [Data Downloader (`dad_downloader.py`)](#data-downloader-dad_downloaderpy)
+9. [Troubleshooting](#troubleshooting)
+10. [File / Folder Structure](#file--folder-structure)
 
 ---
 
@@ -219,6 +220,86 @@ and save your settings before starting tracking.
 
 > **Tip:** Run `minimap_tracker.py` once to calibrate the settings for your
 > screen resolution and save them.  The main viewer picks them up automatically.
+
+---
+
+## Map Scanner V2 Debug Tool (`map_scanner_v2.py`)
+
+A second-generation scanner that works with **random layouts and variable grid
+sizes** by leveraging the faint 10×10 micro-grid present inside every dungeon
+module.  Unlike the original scanner it makes no assumptions about the number
+of modules or their positions.
+
+### How V2 works
+
+| Stage | What happens |
+|-------|--------------|
+| 1 – Map bbox | Slide a window over the centre of the screen looking for a large dark rectangle.  A region whose average brightness is below the threshold is accepted as the map area. |
+| 2 – Micro-grid | Compute Sobel edge magnitudes on the cropped map.  Sum edges along rows and columns to get two 1-D profiles.  Apply FFT to find the dominant periodic spacing.  Both the micro-cell period (~cell/10 px) and module period (~cell px) are searched; the interpretation that gives the cleanest integer grid count in [2, 10] is kept. |
+| 3 – Module grid | Divide the map crop into `n_cols × n_rows` equal tiles, where `n_cols = round(width / module_step_x)`. |
+| 4 – Edge matching | Resize each tile to 64 × 64, compute edge magnitudes, and compare against every known module template (all four 90° rotations) using normalised edge MSE.  Raw pixel MSE is avoided because it is sensitive to brightness / contrast differences between the game and template PNGs. |
+| 5 – Unique assignment | Sort all (tile, module, score) triples by score and greedily assign: each module key is used at most once and each tile receives at most one module.  Tiles with no candidate below `MATCH_THRESHOLD` are marked unknown. |
+
+### Running the debug tool
+
+```bash
+# Interactive GUI – load a screenshot and step through the pipeline
+python map_scanner_v2.py
+
+# Load a saved screenshot directly
+python map_scanner_v2.py  screenshot.png
+```
+
+The GUI toolbar provides:
+
+| Button | Action |
+|--------|--------|
+| 📂 Load Image | Open a PNG / JPEG screenshot for offline analysis |
+| 📷 Screenshot | Capture the primary monitor immediately |
+| 🚀 Run Pipeline | Run all five stages on the current image |
+| 💾 Save Debug | Save one PNG per pipeline stage to `data/debug/` |
+
+The **View** dropdown switches the canvas between the six pipeline stages:
+
+| View | Shows |
+|------|-------|
+| original | Raw loaded / captured image |
+| bbox | Detected map bounding box (green) and all rejected candidates (yellow) |
+| edges | Sobel edge magnitude image of the detected map crop |
+| microgrid | Map crop with micro-cell lines (faint) and module-boundary lines (bright) |
+| grid | Map crop with module tile boundaries and row/col labels |
+| matches | Map crop with tiles coloured by match quality; click a tile to see top-K candidates in the info panel |
+
+### Using V2 inside the main viewer
+
+When a map is loaded in `map_viewer.py`, click the **Scan Map (V2)** toolbar
+button (or press the configured keybind if you add one).  The scanner will:
+
+1. Take a screenshot.
+2. Detect the map area automatically.
+3. Infer the module grid size (3×3, 4×4, … 6×6, etc.).
+4. Classify each tile and apply the discovered layout.
+
+The original **Scan Map** button is still present and unchanged.
+
+### Dependencies
+
+| Package | Role |
+|---------|------|
+| `Pillow` | Required – image loading, rendering, PIL fallback for edge detection |
+| `numpy` | Strongly recommended – Sobel edges, FFT period detection (much faster) |
+| `mss` | Optional – preferred backend for screenshots |
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| "Could not detect map area" | Map too bright, or scaled outside the search range | Open the map fully in-game; if it is very small try lowering `MAP_DARK_THRESH` at the top of `map_scanner_v2.py` |
+| Grid shows wrong number of columns | Module boundary lines too faint for FFT to find | Ensure the map has no strong UI overlay; increase game brightness or contrast |
+| "No module templates found" | `data/modules/<map>/` is empty | Run `dad_downloader.py` to download map tile PNGs |
+| Module matching is poor | Edge NMSE threshold too strict | Raise `MATCH_THRESHOLD` at the top of `map_scanner_v2.py` (default 0.40) |
+| Screenshots fail | Neither `mss` nor `Pillow[ImageGrab]` installed | `pip install mss` or `pip install "Pillow[ImageGrab]"` |
+| Very slow on large maps | Running without numpy | `pip install numpy` |
 
 ---
 
