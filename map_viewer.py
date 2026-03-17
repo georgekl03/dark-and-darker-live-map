@@ -46,6 +46,13 @@ try:
 except ImportError:
     _HAVE_CURSOR_DETECT = False
 
+# Optional: MapScannerV2 (new robust scanner)
+try:
+    from map_scanner_v2 import MapScannerV2 as _MapScannerV2
+    _HAVE_SCANNER_V2 = True
+except ImportError:
+    _HAVE_SCANNER_V2 = False
+
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
 RAW     = DATA / "raw"
@@ -905,7 +912,12 @@ class App(tk.Tk):
         )
         self._track_btn.pack(side="right", padx=(0, 4))
 
-        # Scan Map button
+        # Scan Map (V2) button
+        flat_btn(tb, "\U0001F5FA  Scan Map (V2)", self._trigger_scan_v2,
+                 font=("Segoe UI", 9), padx=10, pady=4,
+                 bg=BTN_BG).pack(side="right", padx=(0, 4))
+
+        # Scan Map button (original)
         flat_btn(tb, "\U0001F5FA  Scan Map", self._trigger_scan,
                  font=("Segoe UI", 9), padx=10, pady=4,
                  bg=BTN_BG).pack(side="right", padx=(0, 4))
@@ -1499,6 +1511,70 @@ class App(tk.Tk):
         self._draw_map()
         self._fit()
         self.status.set(f"[Scan] Layout applied  \u2022  {len(new_mods)} modules matched.")
+
+    # ── Map scanner V2 ────────────────────────────────────
+    def _trigger_scan_v2(self):
+        if not _HAVE_SCANNER_V2:
+            self.status.set("[Scan V2] map_scanner_v2.py not found – "
+                            "ensure it is in the same directory.")
+            return
+        if not (_HAVE_IMAGEGRAB or _HAVE_MSS):
+            self.status.set("[Scan V2] Screenshot not available – "
+                            "install Pillow[ImageGrab] or mss.")
+            return
+        map_name = self._cur_map_name()
+        if not map_name:
+            self.status.set("[Scan V2] Load a map first.")
+            return
+        self.status.set("\U0001F5FA  Scanning screen (V2)\u2026")
+        self.update_idletasks()
+        try:
+            scanner = _MapScannerV2(map_name=map_name)
+            result  = scanner.scan_screen()
+        except Exception as exc:
+            self.status.set(f"[Scan V2] Error: {exc}")
+            return
+        if not result.get("ok"):
+            err = result.get("error", "Unknown error")
+            self.status.set(f"[Scan V2] {err}")
+            return
+        if result.get("warning"):
+            self.status.set(f"[Scan V2] Warning: {result['warning']}")
+        self._apply_scan_result_v2(result)
+
+    def _apply_scan_result_v2(self, result: dict):
+        """Apply a V2 scanner result to the module layout.
+
+        V2 layout structure: {(row, col): {"module": mk, "rot": rot_deg, "score": float}}.
+        """
+        layout   = result.get("layout", {})
+        new_mods = {}
+        for (row, col), info in layout.items():
+            mk = info["module"]
+            if mk in self.modules:
+                m        = dict(self.modules[mk])
+                m["row"] = row
+                m["col"] = col
+                m["rot"] = info.get("rot", 0)
+                new_mods[mk] = m
+        if not new_mods:
+            self.status.set("[Scan V2] No modules matched.  "
+                            "Check templates exist (run dad_downloader.py).")
+            return
+        self.modules    = new_mods
+        self._map_dirty = True
+        self.mod_list.delete(0, "end")
+        self._mk_order = sorted(new_mods,
+                                key=lambda k: (new_mods[k]["row"],
+                                               new_mods[k]["col"]))
+        for mk in self._mk_order:
+            self.mod_list.insert("end", new_mods[mk].get("label", mk))
+        self._update_counts()
+        self._draw_map()
+        self._fit()
+        self.status.set(
+            f"[Scan V2] Layout applied  \u2022  {len(new_mods)} modules matched."
+        )
 
     # ── Minimap tracker ───────────────────────────────────
     def _toggle_tracker(self):
