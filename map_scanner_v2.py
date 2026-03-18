@@ -159,6 +159,15 @@ class ScannerConfig:
     # Bypass bbox
     bypass_bbox: bool = False       # skip bbox stage, use central crop
     bypass_crop_pct: float = 0.80   # how much of screen center to use
+    # BBox refinement (edge-snap after seed selection)
+    bbox_refine: bool = True
+    bbox_refine_band_pct: float = 0.12
+    bbox_refine_min_expand_px: int = 0
+    bbox_refine_max_expand_pct: float = 0.10
+    bbox_refine_edge_quantile: float = 0.85
+    # Grid inference scoring weights
+    grid_score_step_weight: float = 0.5
+    grid_score_line_weight: float = 0.5
 
 
 DEFAULT_CONFIG = ScannerConfig()
@@ -294,6 +303,115 @@ def _compute_edges(img: Image.Image):
     if _HAVE_NUMPY:
         return _sobel_numpy(np.array(img.convert("L"), dtype=np.float32))
     return img.convert("L").filter(ImageFilter.FIND_EDGES)
+
+
+# ── Grid-line scoring helpers ────────────────────────────
+
+def _grid_line_strength(edges, positions: list, axis: int, band: int = 1) -> float:
+    """Sum edge magnitude along candidate grid lines.
+
+    Parameters
+    ----------
+    edges : np.ndarray or PIL Image
+        Edge magnitude image (H×W).
+    positions : list of int
+        Pixel positions of candidate grid lines along *axis*.
+    axis : int
+        0 = vertical lines (vary x), 1 = horizontal lines (vary y).
+    band : int
+        Half-width of the band sampled either side of each line.
+
+    Returns
+    -------
+    float : total summed edge strength (higher = better alignment).
+    """
+    if not positions:
+        return 0.0
+
+    if _HAVE_NUMPY and isinstance(edges, np.ndarray):
+        H, W = edges.shape
+        total = 0.0
+        for p in positions:
+            p = int(round(p))
+            lo = max(0, p - band)
+            hi = min((W if axis == 0 else H) - 1, p + band) + 1
+            if axis == 0:   # vertical line at column p
+                total += float(edges[:, lo:hi].sum())
+            else:            # horizontal line at row p
+                total += float(edges[lo:hi, :].sum())
+        return total
+
+    # PIL fallback: convert to pixel list
+    if edges is None:
+        return 0.0
+    try:
+        arr = list(edges.convert("L").getdata())
+        W2, H2 = edges.size
+    except Exception:
+        return 0.0
+    total = 0.0
+    for p in positions:
+        p = int(round(p))
+        lo = max(0, p - band)
+        hi = min((W2 if axis == 0 else H2) - 1, p + band) + 1
+        for pp in range(lo, hi):
+            if axis == 0:
+                for row in range(H2):
+                    total += arr[row * W2 + pp]
+            else:
+                for col in range(W2):
+                    total += arr[pp * W2 + col]
+    return total
+
+
+def _best_phase_for_N(edges, step: float, N: int, axis: int,
+                       search_radius_px: int = 0) -> "tuple[float, float]":
+    """Find the phase offset that maximises grid-line strength.
+
+    Parameters
+    ----------
+    edges : np.ndarray or PIL Image
+    step : float
+        Candidate module step size in pixels.
+    N : int
+        Number of modules along *axis*.
+    axis : int
+        0 = vertical lines (columns), 1 = horizontal lines (rows).
+    search_radius_px : int
+        Search ±search_radius_px around phase 0.  When 0, searches the full
+        [0, step) range.
+
+    Returns
+    -------
+    (best_phase, best_score)
+    """
+    if step <= 0:
+        return 0.0, 0.0
+
+    if _HAVE_NUMPY and isinstance(edges, np.ndarray):
+        H, W = edges.shape
+        dim = W if axis == 0 else H
+    elif edges is not None:
+        try:
+            W2, H2 = edges.size
+            dim = W2 if axis == 0 else H2
+        except Exception:
+            return 0.0, 0.0
+    else:
+        return 0.0, 0.0
+
+    radius = max(1, int(search_radius_px) if search_radius_px > 0 else int(step))
+    best_phase, best_score = 0.0, -1.0
+
+    for offset in range(radius):
+        positions = [offset + k * step for k in range(N + 1)
+                     if 0 <= offset + k * step <= dim]
+        score = _grid_line_strength(edges, positions, axis)
+        if score > best_score:
+            best_score = score
+            best_phase = float(offset)
+
+    return best_phase, best_score
 
 
 # ── Period detection ─────────────────────────────────────
@@ -501,15 +619,18 @@ class MapScannerV2:
             cy     = (sh - ch) // 2
             bbox   = (cx, cy, cw, ch)
             bbox_cands: list = []
+            bbox_refined: Optional[tuple] = None
             result["bbox_log"].append(
                 f"bypass_bbox=True: using central {frac*100:.0f}% crop "
                 f"({cx},{cy},{cw}×{ch})")
         else:
-            bbox, bbox_cands = self._find_map_bbox(image, result["bbox_log"])
+            bbox, bbox_cands, bbox_refined = self._find_map_bbox(image, result["bbox_log"])
 
-        result["map_bbox"]        = bbox
-        result["bbox_candidates"] = bbox_cands
-        result["timings"]["bbox"] = time.perf_counter() - t0
+        result["map_bbox"]          = bbox           # seed (before refinement)
+        result["map_bbox_seed"]     = bbox           # explicit seed alias
+        result["map_bbox_refined"]  = bbox_refined if not cfg.bypass_bbox else None
+        result["bbox_candidates"]   = bbox_cands
+        result["timings"]["bbox"]   = time.perf_counter() - t0
 
         if bbox is None:
             result["error"] = (
@@ -518,7 +639,11 @@ class MapScannerV2:
             )
             return result
 
-        x, y, w, h = bbox
+        # Use refined bbox as the active region when available
+        active_bbox = bbox_refined if bbox_refined is not None else bbox
+        result["map_bbox"] = active_bbox   # final used bbox
+
+        x, y, w, h = active_bbox
         map_img = image.crop((x, y, x + w, y + h)).convert("L")
 
         # Optional border crop
@@ -580,8 +705,12 @@ class MapScannerV2:
     # ── Stage 1: Map bbox ──────────────────────────────────
 
     def _find_map_bbox(self, image: Image.Image,
-                       log: list) -> "tuple[Optional[tuple], list]":
-        """Return ((x,y,w,h), candidates_list) for the dungeon-map region."""
+                       log: list) -> "tuple[Optional[tuple], list, Optional[tuple]]":
+        """Return (seed_bbox, candidates_list, refined_bbox) for the dungeon-map region.
+
+        ``seed_bbox`` and ``refined_bbox`` are both ``(x, y, w, h)`` tuples.
+        ``refined_bbox`` may differ from ``seed_bbox`` if bbox_refine is enabled.
+        """
         cfg    = self.config
         sw, sh = image.size
         gray   = image.convert("L")
@@ -617,7 +746,9 @@ class MapScannerV2:
 
         if not candidates:
             log.append("No candidates found (all patches too small)")
-            return None, candidates
+            return None, candidates, None
+
+        seed_bbox: Optional[tuple] = None
 
         if cfg.prefer_darkest:
             # Pick candidate with lowest brightness (or highest edge density for "edge")
@@ -628,31 +759,173 @@ class MapScannerV2:
                 best = min(candidates, key=lambda c: c[4])
             cx, cy, cw, ch, metric = best
             log.append(f"prefer_darkest=True: best metric={metric:.1f} at ({cx},{cy})")
-            return (cx, cy, cw, ch), candidates
+            seed_bbox = (cx, cy, cw, ch)
 
-        if method == "edge":
+        elif method == "edge":
             # Higher edge density = more map-like
             edge_thresh = thresh / 255.0 * 0.5
             for cand in candidates:
                 cx, cy, cw, ch, metric = cand
                 if metric > edge_thresh:
                     log.append(f"edge accepted: density={metric:.4f} > {edge_thresh:.4f}")
-                    return (cx, cy, cw, ch), candidates
-            # Fallback: just pick highest edge density
-            best = max(candidates, key=lambda c: c[4])
-            cx, cy, cw, ch, metric = best
-            log.append(f"edge fallback: best density={metric:.4f}")
-            return (cx, cy, cw, ch), candidates
+                    seed_bbox = (cx, cy, cw, ch)
+                    break
+            if seed_bbox is None:
+                # Fallback: just pick highest edge density
+                best = max(candidates, key=lambda c: c[4])
+                cx, cy, cw, ch, metric = best
+                log.append(f"edge fallback: best density={metric:.4f}")
+                seed_bbox = (cx, cy, cw, ch)
 
-        # mean / median / trimmed_mean: first below threshold wins
-        for cand in candidates:
-            cx, cy, cw, ch, metric = cand
-            if metric < thresh:
-                log.append(f"accepted: {method}={metric:.1f} < {thresh}")
-                return (cx, cy, cw, ch), candidates
+        else:
+            # mean / median / trimmed_mean: first below threshold wins
+            for cand in candidates:
+                cx, cy, cw, ch, metric = cand
+                if metric < thresh:
+                    log.append(f"accepted: {method}={metric:.1f} < {thresh}")
+                    seed_bbox = (cx, cy, cw, ch)
+                    break
+            if seed_bbox is None:
+                log.append(f"FAILED: all {len(candidates)} candidates above threshold {thresh}")
+                return None, candidates, None
 
-        log.append(f"FAILED: all {len(candidates)} candidates above threshold {thresh}")
-        return None, candidates
+        # ── Refinement (edge-snap) ────────────────────────
+        refined_bbox: Optional[tuple] = None
+        if cfg.bbox_refine and seed_bbox is not None:
+            refined_bbox = self._refine_bbox_by_edges(gray, seed_bbox, log)
+
+        return seed_bbox, candidates, refined_bbox
+
+    def _refine_bbox_by_edges(self, gray: Image.Image, seed: tuple,
+                               log: list) -> Optional[tuple]:
+        """Refine a seed bbox by walking each side to strong edge projections.
+
+        Converts the seed crop to edges, builds 1-D projections near each
+        side, finds the strong-edge threshold, then adjusts each boundary
+        outward/inward until the projection drops below threshold.
+
+        Returns a (potentially rectangular) refined (x, y, w, h), or the
+        original seed if refinement fails.
+        """
+        cfg = self.config
+        x0, y0, w0, h0 = seed
+        band_pct    = max(0.02, min(0.49, cfg.bbox_refine_band_pct))
+        max_exp_pct = max(0.0,  min(0.40, cfg.bbox_refine_max_expand_pct))
+        quantile    = max(0.50, min(0.99, cfg.bbox_refine_edge_quantile))
+        min_exp_px  = max(0, cfg.bbox_refine_min_expand_px)
+
+        sw, sh = gray.size
+        log.append(f"  refine seed: ({x0},{y0},{w0}×{h0})")
+
+        try:
+            crop = gray.crop((x0, y0, x0 + w0, y0 + h0))
+            edges = _compute_edges(crop)
+
+            if _HAVE_NUMPY and isinstance(edges, np.ndarray):
+                H, W = edges.shape
+                band_x = max(2, int(W * band_pct))
+                band_y = max(2, int(H * band_pct))
+                max_dx = max(min_exp_px, int(W * max_exp_pct))
+                max_dy = max(min_exp_px, int(H * max_exp_pct))
+
+                # Projections in the outer bands of each side
+                left_proj   = edges[:, :band_x].sum(axis=0)      # shape (band_x,)
+                right_proj  = edges[:, W-band_x:].sum(axis=0)    # shape (band_x,)
+                top_proj    = edges[:band_y, :].sum(axis=1)       # shape (band_y,)
+                bottom_proj = edges[H-band_y:, :].sum(axis=1)    # shape (band_y,)
+
+                def _q(arr: "np.ndarray") -> float:
+                    flat = arr.flatten()
+                    flat.sort()
+                    idx = min(len(flat) - 1, int(len(flat) * quantile))
+                    return float(flat[idx])
+
+                # For each side find how far inward (from the outside edge) the
+                # strong-edge threshold is exceeded; use that to compute the delta.
+                def _find_edge_boundary(proj: "np.ndarray", inward: bool) -> int:
+                    """Return the index along proj where we exceed threshold."""
+                    thr = _q(proj) * 0.5
+                    if not inward:
+                        for i in range(len(proj)):
+                            if proj[i] >= thr:
+                                return i
+                    else:
+                        for i in range(len(proj) - 1, -1, -1):
+                            if proj[i] >= thr:
+                                return len(proj) - 1 - i
+                    return 0
+
+                dl = min(max_dx, _find_edge_boundary(left_proj,   False))
+                dr = min(max_dx, _find_edge_boundary(right_proj,  True))
+                dt = min(max_dy, _find_edge_boundary(top_proj,    False))
+                db = min(max_dy, _find_edge_boundary(bottom_proj, True))
+
+                # Expand outward (subtract from left/top, add to right/bottom)
+                nx0 = max(0,       x0 - dl)
+                ny0 = max(0,       y0 - dt)
+                nx1 = min(sw - 1,  x0 + w0 + dr)
+                ny1 = min(sh - 1,  y0 + h0 + db)
+                nw  = max(1, nx1 - nx0)
+                nh  = max(1, ny1 - ny0)
+
+                log.append(
+                    f"  refine deltas: left={dl} right={dr} top={dt} bot={db}  "
+                    f"→ ({nx0},{ny0},{nw}×{nh})")
+                return (nx0, ny0, nw, nh)
+
+            # PIL fallback: simpler projection using PIL FIND_EDGES
+            epil = crop.filter(ImageFilter.FIND_EDGES)
+            W2, H2 = epil.size
+            pix = list(epil.getdata())
+
+            band_x = max(2, int(W2 * band_pct))
+            band_y = max(2, int(H2 * band_pct))
+            max_dx = max(min_exp_px, int(W2 * max_exp_pct))
+            max_dy = max(min_exp_px, int(H2 * max_exp_pct))
+
+            left_proj2  = [sum(pix[r * W2 + c] for r in range(H2)) for c in range(band_x)]
+            right_proj2 = [sum(pix[r * W2 + (W2 - band_x + c)] for r in range(H2))
+                           for c in range(band_x)]
+            top_proj2   = [sum(pix[r * W2 + c] for c in range(W2)) for r in range(band_y)]
+            bot_proj2   = [sum(pix[(H2 - band_y + r) * W2 + c] for c in range(W2))
+                           for r in range(band_y)]
+
+            def _q2(arr: list) -> float:
+                s = sorted(arr)
+                idx = min(len(s) - 1, int(len(s) * quantile))
+                return float(s[idx])
+
+            def _fe(proj: list, inward: bool) -> int:
+                thr = _q2(proj) * 0.5
+                if not inward:
+                    for i, v in enumerate(proj):
+                        if v >= thr:
+                            return i
+                else:
+                    for i in range(len(proj) - 1, -1, -1):
+                        if proj[i] >= thr:
+                            return len(proj) - 1 - i
+                return 0
+
+            dl = min(max_dx, _fe(left_proj2,  False))
+            dr = min(max_dx, _fe(right_proj2, True))
+            dt = min(max_dy, _fe(top_proj2,   False))
+            db = min(max_dy, _fe(bot_proj2,   True))
+
+            nx0 = max(0,       x0 - dl)
+            ny0 = max(0,       y0 - dt)
+            nx1 = min(sw - 1,  x0 + w0 + dr)
+            ny1 = min(sh - 1,  y0 + h0 + db)
+            nw  = max(1, nx1 - nx0)
+            nh  = max(1, ny1 - ny0)
+            log.append(
+                f"  refine (PIL) deltas: left={dl} right={dr} top={dt} bot={db}  "
+                f"→ ({nx0},{ny0},{nw}×{nh})")
+            return (nx0, ny0, nw, nh)
+
+        except Exception as exc:
+            log.append(f"  refine FAILED ({exc}); keeping seed bbox")
+            return None
 
     # ── Stage 2: Micro-grid detection ─────────────────────
 
@@ -806,47 +1079,208 @@ class MapScannerV2:
 
     def _infer_grid(self, map_img: Image.Image, micro: dict,
                     log: list) -> dict:
-        """Divide the map image into a regular grid of module tiles."""
+        """Divide the map image into a regular grid of module tiles.
+
+        Uses search-and-score over candidate grid sizes N in
+        [min_grid_size..max_grid_size] rather than clamping a rounded
+        period estimate.  For the chosen N, gridlines are generated at
+        phase-optimized offsets so tile boundaries align with actual map
+        content.
+        """
         cfg    = self.config
         W, H   = map_img.size
         step_x = max(1, micro.get("module_step_x") or W)
         step_y = max(1, micro.get("module_step_y") or H)
+        micro_step_x = max(1, micro.get("micro_step_x") or 1)
+        micro_step_y = max(1, micro.get("micro_step_y") or 1)
+        offset_x = micro.get("offset_x", 0)
+        offset_y = micro.get("offset_y", 0)
 
+        min_gs = cfg.min_grid_size
         max_gs = cfg.max_grid_size
+        sw     = cfg.grid_score_step_weight
+        lw     = cfg.grid_score_line_weight
 
-        if cfg.override_n_cols > 0:
+        edges = micro.get("_edges")   # may be None in PIL mode
+
+        # ── Override shortcut ─────────────────────────────────────────
+        micro_cells = cfg.micro_cells
+        if cfg.override_n_cols > 0 and cfg.override_n_rows > 0:
+            n_cols = cfg.override_n_cols
+            n_rows = cfg.override_n_rows
+            log.append(f"override_n_cols={n_cols}  override_n_rows={n_rows}")
+        elif cfg.override_n_cols > 0:
             n_cols = cfg.override_n_cols
             log.append(f"override_n_cols={n_cols}")
-        else:
-            n_cols = max(1, min(max_gs, round(W / step_x)))
-
-        if cfg.override_n_rows > 0:
+            n_rows = self._score_best_n(
+                H, step_y, micro_step_y, micro_cells, min_gs, max_gs, sw, lw,
+                edges, axis=1, log=log, label="rows")
+        elif cfg.override_n_rows > 0:
             n_rows = cfg.override_n_rows
             log.append(f"override_n_rows={n_rows}")
+            n_cols = self._score_best_n(
+                W, step_x, micro_step_x, micro_cells, min_gs, max_gs, sw, lw,
+                edges, axis=0, log=log, label="cols")
         else:
-            n_rows = max(1, min(max_gs, round(H / step_y)))
+            n_cols = self._score_best_n(
+                W, step_x, micro_step_x, micro_cells, min_gs, max_gs, sw, lw,
+                edges, axis=0, log=log, label="cols")
+            n_rows = self._score_best_n(
+                H, step_y, micro_step_y, micro_cells, min_gs, max_gs, sw, lw,
+                edges, axis=1, log=log, label="rows")
 
-        log.append(f"grid: {n_cols}×{n_rows} tiles  step_x={step_x} step_y={step_y}")
+        # ── Grid-line generation with phase optimisation ─────────────
+        implied_step_x = W / n_cols if n_cols > 0 else W
+        implied_step_y = H / n_rows if n_rows > 0 else H
 
-        cell_w = W / n_cols
-        cell_h = H / n_rows
+        # Search radius: ±one micro-step so we don't wander far from
+        # the FFT-detected phase.
+        radius_x = max(1, micro_step_x)
+        radius_y = max(1, micro_step_y)
 
-        tiles = [
-            {
-                "row": r, "col": c,
-                "x":   int(c * cell_w),
-                "y":   int(r * cell_h),
-                "w":   int((c + 1) * cell_w) - int(c * cell_w),
-                "h":   int((r + 1) * cell_h) - int(r * cell_h),
-            }
-            for r in range(n_rows)
-            for c in range(n_cols)
-        ]
+        if edges is not None:
+            phase_x, _ = _best_phase_for_N(edges, implied_step_x, n_cols, 0, radius_x)
+            phase_y, _ = _best_phase_for_N(edges, implied_step_y, n_rows, 1, radius_y)
+        else:
+            # PIL fallback: use micro offset as initial phase, no search
+            phase_x = float(offset_x % max(1, implied_step_x))
+            phase_y = float(offset_y % max(1, implied_step_y))
+
+        # Build explicit grid lines (N+1 boundaries, including 0 and dim)
+        x_lines = [max(0, min(W, int(round(phase_x + k * implied_step_x))))
+                   for k in range(n_cols + 1)]
+        y_lines = [max(0, min(H, int(round(phase_y + k * implied_step_y))))
+                   for k in range(n_rows + 1)]
+
+        # Ensure endpoints are exactly 0 and W/H so we don't leave gaps
+        x_lines[0]  = 0
+        x_lines[-1] = W
+        y_lines[0]  = 0
+        y_lines[-1] = H
+
+        # Self-check
+        if len(x_lines) != n_cols + 1:
+            log.append(f"WARN: len(x_lines)={len(x_lines)} expected {n_cols + 1}")
+        if len(y_lines) != n_rows + 1:
+            log.append(f"WARN: len(y_lines)={len(y_lines)} expected {n_rows + 1}")
+
+        log.append(
+            f"grid: {n_cols}×{n_rows} tiles  "
+            f"implied_step_x={implied_step_x:.1f} implied_step_y={implied_step_y:.1f}  "
+            f"phase_x={phase_x:.1f} phase_y={phase_y:.1f}")
+        log.append(
+            f"  x_lines[0..{n_cols}]={x_lines}  "
+            f"y_lines[0..{n_rows}]={y_lines}")
+
+        tiles = []
+        for r in range(n_rows):
+            for c in range(n_cols):
+                tx = x_lines[c]
+                ty = y_lines[r]
+                tw = x_lines[c + 1] - tx
+                th = y_lines[r + 1] - ty
+                if tw > 0 and th > 0:
+                    tiles.append({
+                        "row": r, "col": c,
+                        "x": tx, "y": ty,
+                        "w": tw, "h": th,
+                    })
+
         return {
-            "n_rows": n_rows, "n_cols": n_cols,
-            "cell_w": cell_w, "cell_h": cell_h,
-            "tiles":  tiles,
+            "n_rows":  n_rows,  "n_cols":  n_cols,
+            "cell_w":  implied_step_x, "cell_h": implied_step_y,
+            "x_lines": x_lines, "y_lines": y_lines,
+            "tiles":   tiles,
         }
+
+    def _score_best_n(self, dim: int, detected_step: float,
+                      micro_step: float, micro_cells: int,
+                      min_gs: int, max_gs: int,
+                      sw: float, lw: float,
+                      edges, axis: int,
+                      log: list, label: str) -> int:
+        """Evaluate candidate grid sizes and return the best N.
+
+        Parameters
+        ----------
+        dim : int
+            Image dimension in pixels (width for cols, height for rows).
+        detected_step : float
+            Module step detected by microgrid FFT (pixels per module).
+        micro_step : float
+            Micro-cell step (pixels per sub-cell).
+        micro_cells : int
+            Number of micro-cells per module.
+        min_gs, max_gs : int
+            Range of allowed N.
+        sw, lw : float
+            Weights for step-closeness and line-strength scoring.
+        edges : array-like or None
+            Edge magnitude image.
+        axis : int
+            0 = cols (vertical lines), 1 = rows (horizontal lines).
+        log : list
+            Log target.
+        label : str
+            Human label for log output.
+        """
+        micro_derived_step = micro_step * micro_cells
+
+        def _step_score(implied: float, ref: float) -> float:
+            if ref <= 0:
+                return 0.0
+            return 1.0 / (1.0 + abs(implied - ref) / max(ref, 1.0))
+
+        rows_log = [f"  N-scoring ({label}, dim={dim}):"]
+
+        best_n = min_gs
+        best_total = 0.0
+
+        candidates_scores: list = []
+
+        for N in range(min_gs, max_gs + 1):
+            if N <= 0:
+                continue
+            implied = dim / N
+
+            # Step-closeness score (average over two period references)
+            sc1 = _step_score(implied, detected_step)
+            sc2 = _step_score(implied, micro_derived_step)
+            step_sc = (sc1 + sc2) / 2.0
+
+            # Line-strength score using best phase for this N
+            if edges is not None:
+                phase, line_sc = _best_phase_for_N(edges, implied, N, axis)
+            else:
+                phase, line_sc = 0.0, 0.0
+
+            candidates_scores.append((N, implied, step_sc, line_sc, phase))
+
+        # Normalise line scores to [0,1]
+        if candidates_scores:
+            max_line = max(c[3] for c in candidates_scores) or 1.0
+            candidates_scores = [
+                (N, imp, ssc, lsc / max_line, ph)
+                for N, imp, ssc, lsc, ph in candidates_scores
+            ]
+
+        for N, implied, step_sc, line_sc_norm, phase in candidates_scores:
+            total = sw * step_sc + lw * line_sc_norm
+            rows_log.append(
+                f"    N={N:2d} step={implied:6.1f}  "
+                f"step_sc={step_sc:.3f}  line_sc={line_sc_norm:.3f}  "
+                f"total={total:.3f}  phase={phase:.1f}")
+            if total > best_total:
+                best_total = total
+                best_n = N
+
+        rows_log.append(f"  → best {label} N={best_n} (total={best_total:.3f})")
+        for line in rows_log:
+            log.append(line)
+
+        return max(1, best_n)
+
+
 
     # ── Stage 4: Templates ─────────────────────────────────
 
@@ -963,8 +1397,23 @@ def _rgba(image: Image.Image) -> Image.Image:
 
 
 def draw_bbox_overlay(image: Image.Image, bbox: Optional[tuple],
-                      candidates: list) -> Image.Image:
-    """Highlight the detected map bbox (and all candidates) on the full image."""
+                      candidates: list,
+                      seed_bbox: Optional[tuple] = None,
+                      refined_bbox: Optional[tuple] = None) -> Image.Image:
+    """Highlight the detected map bbox (and all candidates) on the full image.
+
+    Parameters
+    ----------
+    bbox : tuple or None
+        The final active bbox (``(x,y,w,h)``).
+    candidates : list
+        All scored candidates from the seed-selection stage.
+    seed_bbox : tuple or None
+        The original seed bbox before refinement.  Drawn in orange when
+        different from *bbox*.
+    refined_bbox : tuple or None
+        The refined bbox after edge-snap.  Drawn in green when present.
+    """
     out  = _rgba(image)
     draw = ImageDraw.Draw(out)
 
@@ -974,12 +1423,26 @@ def draw_bbox_overlay(image: Image.Image, bbox: Optional[tuple],
         draw.rectangle([cx, cy, cx + cw, cy + ch],
                        outline=(200, 180, 60, 120), width=2)
 
-    # Highlight the best (accepted) bbox in bright green
+    # Draw seed bbox in orange (if it differs from the final active bbox)
+    if seed_bbox and seed_bbox != bbox:
+        sx, sy, sw2, sh2 = seed_bbox
+        draw.rectangle([sx, sy, sx + sw2, sy + sh2],
+                       outline=(240, 140, 30, 200), width=3)
+        draw.text((sx + 6, sy + 6), "Seed bbox", fill=(240, 140, 30, 200))
+
+    # Draw refined bbox in cyan
+    if refined_bbox:
+        rx, ry, rw, rh = refined_bbox
+        draw.rectangle([rx, ry, rx + rw, ry + rh],
+                       outline=(60, 220, 220, 230), width=3)
+        draw.text((rx + 6, ry + 6 + 16), "Refined bbox", fill=(60, 220, 220, 230))
+
+    # Highlight the final active bbox in bright green
     if bbox:
         x, y, w, h = bbox
         draw.rectangle([x, y, x + w, y + h],
                        outline=(80, 230, 80, 240), width=4)
-        draw.text((x + 6, y + 6), "Detected map area", fill=(80, 230, 80, 240))
+        draw.text((x + 6, y + 6), "Active map area", fill=(80, 230, 80, 240))
 
     del draw
     return out
@@ -1047,7 +1510,7 @@ def draw_profiles_image(micro: dict, size: tuple = (512, 256)) -> Image.Image:
     _draw_profile(micro.get("_proj_x"), (120, 220, 120, 200), 20,        half - 24)
     _draw_profile(micro.get("_proj_y"), (120, 120, 220, 200), half + 20, half - 24)
 
-    # Draw vertical lines for module steps
+    # Draw vertical lines for module steps (from FFT offset)
     msx   = micro.get("module_step_x", 0)
     proj_x = micro.get("_proj_x")
     if msx and proj_x is not None:
@@ -1059,6 +1522,24 @@ def draw_profiles_image(micro: dict, size: tuple = (512, 256)) -> Image.Image:
                 draw.line([(int(x), 20), (int(x), half - 4)],
                           fill=(200, 200, 60, 150), width=1)
                 x += msx * x_per_px
+
+    # Draw final snapped grid lines on top (from grid x_lines/y_lines)
+    grid = micro.get("_grid")   # optionally injected by _build_step_images
+    if grid:
+        proj_xd = micro.get("_proj_x")
+        dim_x = len(proj_xd) if proj_xd is not None and hasattr(proj_xd, "__len__") else 1
+        x_per_px = W / max(dim_x, 1)
+        for xp in grid.get("x_lines", []):
+            draw.line([(int(xp * x_per_px), 20), (int(xp * x_per_px), half - 4)],
+                      fill=(60, 220, 220, 200), width=2)
+
+        proj_yd = micro.get("_proj_y")
+        dim_y = len(proj_yd) if proj_yd is not None and hasattr(proj_yd, "__len__") else 1
+        y_per_px = (H // 2 - 24) / max(dim_y, 1)
+        for yp in grid.get("y_lines", []):
+            screen_y = half + 20 + (H // 2 - 24) - int(yp * y_per_px)
+            draw.line([(0, screen_y), (W, screen_y)],
+                      fill=(220, 60, 220, 200), width=2)
 
     del draw
     return out
@@ -1115,10 +1596,34 @@ def draw_microgrid_overlay(map_img: Image.Image, micro: dict) -> Image.Image:
 
 
 def draw_grid_overlay(map_img: Image.Image, grid: dict) -> Image.Image:
-    """Draw module tile boundaries on the map crop."""
+    """Draw module tile boundaries on the map crop.
+
+    When ``grid`` contains ``x_lines`` / ``y_lines`` (from the phase-snapped
+    grid-inference stage), those explicit boundary lines are drawn in addition
+    to the tile rectangles to make alignment clearly visible.
+    """
     out  = _rgba(map_img)
     draw = ImageDraw.Draw(out)
+    W, H = map_img.size
 
+    x_lines = grid.get("x_lines", [])
+    y_lines = grid.get("y_lines", [])
+
+    # Draw explicit snapped grid lines (vertical)
+    for i, xp in enumerate(x_lines):
+        color = (60, 200, 240, 220) if i in (0, len(x_lines) - 1) else (60, 180, 220, 160)
+        draw.line([(xp, 0), (xp, H)], fill=color, width=2)
+        if 0 < i < len(x_lines) - 1:
+            draw.text((xp + 2, 2), str(i), fill=(60, 180, 220, 220))
+
+    # Draw explicit snapped grid lines (horizontal)
+    for i, yp in enumerate(y_lines):
+        color = (60, 200, 240, 220) if i in (0, len(y_lines) - 1) else (60, 220, 180, 160)
+        draw.line([(0, yp), (W, yp)], fill=color, width=2)
+        if 0 < i < len(y_lines) - 1:
+            draw.text((2, yp + 2), str(i), fill=(60, 220, 180, 220))
+
+    # Draw tile rectangles and indices on top
     for tile in grid.get("tiles", []):
         x0, y0 = tile["x"], tile["y"]
         x1, y1 = x0 + tile["w"], y0 + tile["h"]
@@ -1435,7 +1940,20 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
         _row(f, "prefer_darkest:",
              lambda p: _check(p, "prefer_darkest"))
 
-        # ── Crop Preprocessing ────────────────────────────
+        # ── BBox Refinement ───────────────────────────────
+        f = _lf(settings_frame, "BBox Refinement")
+        _row(f, "bbox_refine:",
+             lambda p: _check(p, "bbox_refine"))
+        _row(f, "refine_band_pct (0-49):",
+             lambda p: _spin(p, "bbox_refine_band_pct", 0, 49, 1, 5, is_float=True))
+        _row(f, "refine_min_expand_px:",
+             lambda p: _spin(p, "bbox_refine_min_expand_px", 0, 100, 1, 5))
+        _row(f, "refine_max_expand% (0-40):",
+             lambda p: _spin(p, "bbox_refine_max_expand_pct", 0, 40, 1, 5, is_float=True))
+        _row(f, "refine_edge_quantile:",
+             lambda p: _spin(p, "bbox_refine_edge_quantile", 0.50, 0.99, 0.01, 6, is_float=True))
+
+
         f = _lf(settings_frame, "Crop Preprocessing")
         _row(f, "border_crop_pct % (0-20):",
              lambda p: _spin(p, "border_crop_pct", 0, 20, 1, 5, is_float=True))
@@ -1471,6 +1989,10 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
              lambda p: _spin(p, "override_n_rows", 0, 20, 1, 5))
         _row(f, "override_n_cols (0=auto):",
              lambda p: _spin(p, "override_n_cols", 0, 20, 1, 5))
+        _row(f, "step_weight (0-1):",
+             lambda p: _spin(p, "grid_score_step_weight", 0.0, 1.0, 0.05, 6, is_float=True))
+        _row(f, "line_weight (0-1):",
+             lambda p: _spin(p, "grid_score_line_weight", 0.0, 1.0, 0.05, 6, is_float=True))
 
         # ── Template Matching ─────────────────────────────
         f = _lf(settings_frame, "Template Matching")
@@ -1534,66 +2056,80 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
                 return default
 
         return ScannerConfig(
-            dark_thresh          = _i("dark_thresh", 65),
-            bbox_method          = _s("bbox_method", "mean"),
-            search_margin        = _f("search_margin", 5.0) / 100.0,
-            min_frac             = _f("min_frac", 0.20),
-            max_frac             = _f("max_frac", 0.90),
-            frac_step            = _f("frac_step", 0.05),
-            prefer_darkest       = _b("prefer_darkest"),
-            border_crop_pct      = _f("border_crop_pct", 0.0) / 100.0,
-            contrast_boost       = _b("contrast_boost"),
-            unsharp_mask         = _b("unsharp_mask"),
-            min_micro            = _i("min_micro", 2),
-            max_micro            = _i("max_micro", 30),
-            min_module           = _i("min_module", 15),
-            max_module           = _i("max_module", 500),
-            micro_cells          = _i("micro_cells", 10),
-            force_micro_period   = _i("force_micro_period", 0),
-            force_module_period  = _i("force_module_period", 0),
-            min_grid_size        = _i("min_grid_size", 2),
-            max_grid_size        = _i("max_grid_size", 10),
-            override_n_rows      = _i("override_n_rows", 0),
-            override_n_cols      = _i("override_n_cols", 0),
-            match_thr            = _f("match_thr", 0.40),
-            tmpl_size            = _i("tmpl_size", 64),
-            top_k                = _i("top_k", 5),
-            unique_assignment    = _b("unique_assignment", True),
-            bypass_bbox          = _b("bypass_bbox"),
-            bypass_crop_pct      = _f("bypass_crop_pct", 80.0) / 100.0,
+            dark_thresh                 = _i("dark_thresh", 65),
+            bbox_method                 = _s("bbox_method", "mean"),
+            search_margin               = _f("search_margin", 5.0) / 100.0,
+            min_frac                    = _f("min_frac", 0.20),
+            max_frac                    = _f("max_frac", 0.90),
+            frac_step                   = _f("frac_step", 0.05),
+            prefer_darkest              = _b("prefer_darkest"),
+            bbox_refine                 = _b("bbox_refine", True),
+            bbox_refine_band_pct        = _f("bbox_refine_band_pct", 12.0) / 100.0,
+            bbox_refine_min_expand_px   = _i("bbox_refine_min_expand_px", 0),
+            bbox_refine_max_expand_pct  = _f("bbox_refine_max_expand_pct", 10.0) / 100.0,
+            bbox_refine_edge_quantile   = _f("bbox_refine_edge_quantile", 0.85),
+            border_crop_pct             = _f("border_crop_pct", 0.0) / 100.0,
+            contrast_boost              = _b("contrast_boost"),
+            unsharp_mask                = _b("unsharp_mask"),
+            min_micro                   = _i("min_micro", 2),
+            max_micro                   = _i("max_micro", 30),
+            min_module                  = _i("min_module", 15),
+            max_module                  = _i("max_module", 500),
+            micro_cells                 = _i("micro_cells", 10),
+            force_micro_period          = _i("force_micro_period", 0),
+            force_module_period         = _i("force_module_period", 0),
+            min_grid_size               = _i("min_grid_size", 2),
+            max_grid_size               = _i("max_grid_size", 10),
+            override_n_rows             = _i("override_n_rows", 0),
+            override_n_cols             = _i("override_n_cols", 0),
+            grid_score_step_weight      = _f("grid_score_step_weight", 0.5),
+            grid_score_line_weight      = _f("grid_score_line_weight", 0.5),
+            match_thr                   = _f("match_thr", 0.40),
+            tmpl_size                   = _i("tmpl_size", 64),
+            top_k                       = _i("top_k", 5),
+            unique_assignment           = _b("unique_assignment", True),
+            bypass_bbox                 = _b("bypass_bbox"),
+            bypass_crop_pct             = _f("bypass_crop_pct", 80.0) / 100.0,
         )
 
     def _apply_config_to_ui(self, cfg: ScannerConfig):
         """Push a ScannerConfig into all settings widgets."""
         sv = self._sv
         mapping = {
-            "dark_thresh":         str(cfg.dark_thresh),
-            "bbox_method":         cfg.bbox_method,
-            "search_margin":       str(round(cfg.search_margin * 100, 4)),
-            "min_frac":            str(cfg.min_frac),
-            "max_frac":            str(cfg.max_frac),
-            "frac_step":           str(cfg.frac_step),
-            "prefer_darkest":      cfg.prefer_darkest,
-            "border_crop_pct":     str(round(cfg.border_crop_pct * 100, 4)),
-            "contrast_boost":      cfg.contrast_boost,
-            "unsharp_mask":        cfg.unsharp_mask,
-            "min_micro":           str(cfg.min_micro),
-            "max_micro":           str(cfg.max_micro),
-            "min_module":          str(cfg.min_module),
-            "max_module":          str(cfg.max_module),
-            "micro_cells":         str(cfg.micro_cells),
-            "force_micro_period":  str(cfg.force_micro_period),
-            "force_module_period": str(cfg.force_module_period),
-            "min_grid_size":       str(cfg.min_grid_size),
-            "max_grid_size":       str(cfg.max_grid_size),
-            "override_n_rows":     str(cfg.override_n_rows),
-            "override_n_cols":     str(cfg.override_n_cols),
-            "match_thr":           str(cfg.match_thr),
-            "tmpl_size":           str(cfg.tmpl_size),
-            "top_k":               str(cfg.top_k),
-            "unique_assignment":   cfg.unique_assignment,
-            "bypass_bbox":         cfg.bypass_bbox,
-            "bypass_crop_pct":     str(round(cfg.bypass_crop_pct * 100, 4)),
+            "dark_thresh":                  str(cfg.dark_thresh),
+            "bbox_method":                  cfg.bbox_method,
+            "search_margin":                str(round(cfg.search_margin * 100, 4)),
+            "min_frac":                     str(cfg.min_frac),
+            "max_frac":                     str(cfg.max_frac),
+            "frac_step":                    str(cfg.frac_step),
+            "prefer_darkest":               cfg.prefer_darkest,
+            "bbox_refine":                  cfg.bbox_refine,
+            "bbox_refine_band_pct":         str(round(cfg.bbox_refine_band_pct * 100, 2)),
+            "bbox_refine_min_expand_px":    str(cfg.bbox_refine_min_expand_px),
+            "bbox_refine_max_expand_pct":   str(round(cfg.bbox_refine_max_expand_pct * 100, 2)),
+            "bbox_refine_edge_quantile":    str(cfg.bbox_refine_edge_quantile),
+            "border_crop_pct":              str(round(cfg.border_crop_pct * 100, 4)),
+            "contrast_boost":               cfg.contrast_boost,
+            "unsharp_mask":                 cfg.unsharp_mask,
+            "min_micro":                    str(cfg.min_micro),
+            "max_micro":                    str(cfg.max_micro),
+            "min_module":                   str(cfg.min_module),
+            "max_module":                   str(cfg.max_module),
+            "micro_cells":                  str(cfg.micro_cells),
+            "force_micro_period":           str(cfg.force_micro_period),
+            "force_module_period":          str(cfg.force_module_period),
+            "min_grid_size":                str(cfg.min_grid_size),
+            "max_grid_size":                str(cfg.max_grid_size),
+            "override_n_rows":              str(cfg.override_n_rows),
+            "override_n_cols":              str(cfg.override_n_cols),
+            "grid_score_step_weight":       str(cfg.grid_score_step_weight),
+            "grid_score_line_weight":       str(cfg.grid_score_line_weight),
+            "match_thr":                    str(cfg.match_thr),
+            "tmpl_size":                    str(cfg.tmpl_size),
+            "top_k":                        str(cfg.top_k),
+            "unique_assignment":            cfg.unique_assignment,
+            "bypass_bbox":                  cfg.bypass_bbox,
+            "bypass_crop_pct":              str(round(cfg.bypass_crop_pct * 100, 4)),
         }
         for key, val in mapping.items():
             if key not in sv:
@@ -1732,9 +2268,14 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
             return
         self._step_imgs["original"] = img.copy()
 
-        bbox       = result.get("map_bbox")
-        bbox_cands = result.get("bbox_candidates", [])
-        self._step_imgs["bbox"]         = draw_bbox_overlay(img, bbox, bbox_cands)
+        bbox         = result.get("map_bbox")
+        seed_bbox    = result.get("map_bbox_seed")     # kept for reference
+        refined_bbox = result.get("map_bbox_refined")
+        bbox_cands   = result.get("bbox_candidates", [])
+        self._step_imgs["bbox"] = draw_bbox_overlay(
+            img, bbox, bbox_cands,
+            seed_bbox=seed_bbox,
+            refined_bbox=refined_bbox)
         self._step_imgs["bbox_heatmap"] = draw_bbox_heatmap(img, bbox_cands, bbox)
 
         map_img = result.get("map_image")
@@ -1751,7 +2292,11 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
             self._step_imgs["edges"] = draw_edge_overlay(None, map_img.size)
 
         self._step_imgs["microgrid"] = draw_microgrid_overlay(map_img, micro)
-        self._step_imgs["profiles"]  = draw_profiles_image(micro, size=(512, 256))
+
+        # Inject grid reference so profiles can draw final grid lines
+        micro_with_grid = dict(micro)
+        micro_with_grid["_grid"] = grid
+        self._step_imgs["profiles"]  = draw_profiles_image(micro_with_grid, size=(512, 256))
         self._step_imgs["grid"]      = draw_grid_overlay(map_img, grid)
 
         layout = result.get("layout", {})
@@ -1771,10 +2316,15 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
             parts = [f"{k}={v*1000:.1f}ms" for k, v in timings.items()]
             self._log_msg("  ⏱  " + "  ".join(parts))
 
-        bbox = result.get("map_bbox")
+        bbox         = result.get("map_bbox")
+        refined_bbox = result.get("map_bbox_refined")
         if bbox:
-            self._log_msg(f"  ✓  Map bbox: x={bbox[0]} y={bbox[1]} "
+            self._log_msg(f"  ✓  Active map bbox: x={bbox[0]} y={bbox[1]} "
                           f"w={bbox[2]} h={bbox[3]}")
+        if refined_bbox:
+            rb = refined_bbox
+            self._log_msg(f"  ✓  Refined bbox:    x={rb[0]} y={rb[1]} "
+                          f"w={rb[2]} h={rb[3]}")
 
         # BBox log
         for line in result.get("bbox_log", []):
@@ -1804,6 +2354,13 @@ class ScannerV2App(_TkBase):  # type: ignore[misc]
         self._log_msg(
             f"  Grid: {grid.get('n_cols')}×{grid.get('n_rows')} tiles  "
             f"(cell {grid.get('cell_w', 0):.1f}×{grid.get('cell_h', 0):.1f} px)")
+
+        x_lines = grid.get("x_lines", [])
+        y_lines = grid.get("y_lines", [])
+        if x_lines:
+            self._log_msg(f"  x_lines ({len(x_lines)}): {x_lines}")
+        if y_lines:
+            self._log_msg(f"  y_lines ({len(y_lines)}): {y_lines}")
 
         for line in result.get("grid_log", []):
             self._log_msg("  grid: " + line)
