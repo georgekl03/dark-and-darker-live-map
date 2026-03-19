@@ -25,25 +25,28 @@ a standalone screen-scanner/debug toolset.
 5. [Map Scanner Debug Tool (`map_scanner.py`)](#map-scanner-debug-tool-map_scannerpy)
 6. [Map Scanner V2 Debug Tool (`map_scanner_v2.py`)](#map-scanner-v2-debug-tool-map_scanner_v2py)
 7. [Minimap Tracker Debug Tool (`minimap_tracker.py`)](#minimap-tracker-debug-tool-minimap_trackerpy)
-8. [Data Downloader (`dad_downloader.py`)](#data-downloader-dad_downloaderpy)
-9. [Troubleshooting](#troubleshooting)
-10. [File / Folder Structure](#file--folder-structure)
+8. [Map Calibration Tool (`ui/calibration_app.py`)](#map-calibration-tool-uicalibration_apppy)
+9. [CLI Detection Pipeline (`detect_cli.py`)](#cli-detection-pipeline-detect_clipy)
+10. [Data Downloader (`dad_downloader.py`)](#data-downloader-dad_downloaderpy)
+11. [Troubleshooting](#troubleshooting)
+12. [File / Folder Structure](#file--folder-structure)
 
 ---
 
 ## Requirements
 
-| Package    | Required | Notes                                  |
-|------------|----------|----------------------------------------|
-| Python     | ✅ 3.10+ | <https://www.python.org/downloads/>    |
-| Pillow     | ✅       | `pip install Pillow`                   |
-| requests   | ✅       | `pip install requests`                 |
-| numpy      | optional | Faster image operations                |
-| mss        | optional | Fastest screen capture (recommended)   |
+| Package        | Required | Notes                                        |
+|----------------|----------|----------------------------------------------|
+| Python         | ✅ 3.10+ | <https://www.python.org/downloads/>          |
+| Pillow         | ✅       | `pip install Pillow`                         |
+| requests       | ✅       | `pip install requests`                       |
+| numpy          | optional | Faster image operations                      |
+| mss            | optional | Fastest screen capture (recommended)         |
+| opencv-python  | optional | Improved contour-based bbox detection        |
 
 Install everything at once:
 ```bash
-pip install Pillow requests numpy mss
+pip install Pillow requests numpy mss opencv-python
 ```
 
 ---
@@ -53,7 +56,7 @@ pip install Pillow requests numpy mss
 ```bash
 git clone <repo-url>
 cd dark-and-darker-live-map
-pip install Pillow requests numpy mss
+pip install Pillow requests numpy mss opencv-python
 ```
 
 ---
@@ -538,6 +541,167 @@ download.  If the server returns an HTML error page instead of a real image
 (common for map modules that do not exist – e.g. some Abyss variants and
 placeholder entries) the file is discarded and not saved to disk.  This keeps
 `data/modules/` clean without any manual purification step.
+
+---
+
+
+
+## Map Calibration Tool (`ui/calibration_app.py`)
+
+An interactive desktop application to debug and tune map detection settings with live visual feedback.
+
+### Running the calibration tool
+```bash
+python ui/calibration_app.py
+```
+Or, to load an image immediately:
+```bash
+python ui/calibration_app.py path/to/screenshot.png
+```
+
+### Layout
+The tool has three panels:
+- **Left sidebar** – Settings panels for every detection parameter, with sliders, checkboxes and help text explaining each setting.
+- **Centre canvas** – Image display with zoom (mouse wheel) and pan (drag). Shows detection overlays.
+- **Right panel** – Stage thumbnails (click to jump to that step) and a debug log.
+
+### Detection modes
+| Mode | Description |
+|------|-------------|
+| Outer Square (Edge+Contour) | Uses Canny edge detection and contour analysis to find the bright outer map border. **Recommended.** |
+| Outer Square (Dark Box) | Legacy centred-square dark-area heuristic from V1/V2. Use as fallback. |
+| Micro-Grid First | Scans candidate windows for strongest micro-grid periodicity signal; no bbox needed first. |
+| Manual Crop | Draw a rectangle on the image to define the map region; skip bbox detection. |
+
+### Stage visualization
+After clicking **▶ Run Detection**, eight overlay stages appear in the thumbnail panel:
+1. **Original** – raw screenshot
+2. **Preprocessed** – gamma/CLAHE/autocontrast/unsharp applied to map crop
+3. **Edge Map** – Sobel edge magnitude
+4. **BBox Overlay** – full image with detected bbox highlighted
+5. **Map Crop** – cropped map region alone
+6. **Micro-Grid Overlay** – detected micro-grid lines drawn on map crop (cyan)
+7. **Module Grid** – module-level tile boundaries (yellow)
+
+### Settings reference
+
+#### BBox – Outer Border Detection
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `dark_thresh` | 65 | Max mean brightness to accept as map. Raise if "all candidates above threshold". |
+| `bbox_method` | mean | Scoring metric: mean/median/trimmed_mean/edge. Use `edge` for varied lighting. |
+| `search_margin` | 0.05 | Fraction of screen to ignore at each edge. |
+| `min_frac` / `max_frac` | 0.20 / 0.90 | Map size range as fraction of inner region. |
+| `prefer_darkest` | off | Always pick darkest patch regardless of threshold. |
+| `use_edge_contour` | on | Edge+contour method for bright outer border (recommended). |
+| `canny_low` / `canny_high` | 30 / 100 | Canny edge thresholds. Lower if border not found. |
+| `min_border_brightness` | 80 | Min brightness for outer border to qualify. |
+| `contour_min_area_frac` | 0.05 | Min contour area as fraction of image. |
+| `contour_max_area_frac` | 0.85 | Max contour area as fraction of image. |
+| `contour_min_solidity` | 0.70 | How filled the contour must be (convex hull ratio). |
+
+#### BBox – Refinement
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `bbox_refine` | on | Edge-snap the seed bbox outward to nearest strong edges. |
+| `bbox_refine_band_pct` | 0.12 | Band width near each edge for refinement sampling. |
+| `bbox_refine_max_expand_pct` | 0.10 | Max expansion per side as fraction of bbox size. |
+
+#### Micro-Grid Detection
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `min_micro` / `max_micro` | 2 / 30 | Search range for micro-cell period in pixels. |
+| `min_module` / `max_module` | 15 / 500 | Search range for module period in pixels. |
+| `micro_cells` | 10 | Sub-cells per module (always 10 in D&D). |
+| `force_micro_period` | 0 | Force exact micro-cell period (0 = auto). |
+| `force_module_period` | 0 | Force exact module period (0 = auto). |
+| `min_grid_size` / `max_grid_size` | 2 / 10 | Allowed module count range per axis. |
+
+#### Preprocessing
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `gamma` | 1.0 | Gamma correction. < 1.0 brightens (helps faint grids). |
+| `clahe` | off | CLAHE contrast enhancement — dramatically improves faint micro-grid visibility. |
+| `autocontrast` | off | Simple autocontrast stretch. |
+| `unsharp` | off | Unsharp mask sharpening for blurry grid lines. |
+
+### Saving and loading presets
+
+After tuning settings for your screen/resolution, save them as a preset:
+1. Click **💾 Save Preset** and enter a name (e.g. `dark-dungeon-1080p`).
+2. The preset is saved to `data/debug/presets/presets.json`.
+3. Load it on next run via **📂 Load Preset**.
+
+Presets are automatically loaded by `detect_cli.py` using `--preset {name}`.
+
+### Manual crop workflow
+1. Select **Manual Crop** mode from the mode dropdown.
+2. Click **Draw Crop Rectangle** in the Manual Crop section.
+3. Click and drag on the image to draw the map region.
+4. Click **▶ Run Detection** — bbox stage is skipped; detection runs on your drawn crop.
+5. This is useful when automatic bbox detection fails or when testing micro-grid detection on a known-good crop.
+
+---
+
+## CLI Detection Pipeline (`detect_cli.py`)
+
+Run detection on an image from the command line and emit debug artifacts for headless testing.
+
+### Basic usage
+```bash
+python detect_cli.py screenshot.png
+```
+
+### Options
+```
+positional arguments:
+  image_path            Path to input image (PNG or JPG)
+
+optional arguments:
+  --mode {edge_contour,dark_box,microgrid_first}
+                        Detection mode (default: edge_contour)
+  --output-dir DIR      Output directory (default: data/debug/cli_output)
+  --dark-thresh N       Max brightness threshold for dark-box mode (default: 65)
+  --canny-low N         Canny lower threshold (default: 30)
+  --canny-high N        Canny upper threshold (default: 100)
+  --min-border-brightness N
+                        Min brightness for outer border region (default: 80)
+  --gamma F             Gamma correction (default: 1.0)
+  --clahe               Enable CLAHE contrast enhancement
+  --autocontrast        Enable autocontrast
+  --unsharp             Enable unsharp mask
+  --force-micro-period N  Force micro-cell period in pixels (0 = auto)
+  --force-module-period N Force module period in pixels (0 = auto)
+  --min-grid-size N     Minimum module count per axis (default: 2)
+  --max-grid-size N     Maximum module count per axis (default: 10)
+  --preset NAME         Load settings from data/debug/presets/presets.json
+  --save-preset NAME    Save used settings as a new preset after running
+  --no-images           Skip saving debug images, only save report.json
+  --verbose             Print detailed detection log to stdout
+```
+
+### Outputs
+All files are written to `--output-dir` (default: `data/debug/cli_output/`):
+
+| File | Description |
+|------|-------------|
+| `report.json` | Full detection report with bbox, microgrid metrics, logs and timings |
+| `01_original.png` | Original input image |
+| `02_preprocessed.png` | Preprocessed map crop |
+| `03_edges.png` | Edge magnitude image |
+| `04_bbox_overlay.png` | Image with detected bbox drawn |
+| `05_map_crop.png` | Isolated map crop |
+| `06_microgrid_overlay.png` | Map crop with micro-grid lines |
+
+### Example: saving a preset from CLI
+```bash
+python detect_cli.py screenshot.png --clahe --gamma 0.7 --save-preset dark-dungeon
+```
+
+Then reuse it:
+```bash
+python detect_cli.py new_screenshot.png --preset dark-dungeon
+```
 
 ---
 
