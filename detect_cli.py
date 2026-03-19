@@ -83,18 +83,25 @@ def _build_parser() -> argparse.ArgumentParser:
 # Config helpers
 # ---------------------------------------------------------------------------
 
+_CLI_DEFAULTS: dict = {
+    "dark_thresh": 65,
+    "canny_low": 30,
+    "canny_high": 100,
+    "min_border_brightness": 80,
+}
+
+
 def _build_bbox_config(args: argparse.Namespace, preset: BboxConfig | None) -> BboxConfig:
     base = preset if preset is not None else BboxConfig()
     # CLI args override preset values only when they differ from their defaults
-    defaults = _build_parser().parse_args(["_placeholder_"])
     overrides: dict = {}
-    if args.dark_thresh != defaults.dark_thresh:
+    if args.dark_thresh != _CLI_DEFAULTS["dark_thresh"]:
         overrides["dark_thresh"] = args.dark_thresh
-    if args.canny_low != defaults.canny_low:
+    if args.canny_low != _CLI_DEFAULTS["canny_low"]:
         overrides["canny_low"] = args.canny_low
-    if args.canny_high != defaults.canny_high:
+    if args.canny_high != _CLI_DEFAULTS["canny_high"]:
         overrides["canny_high"] = args.canny_high
-    if args.min_border_brightness != defaults.min_border_brightness:
+    if args.min_border_brightness != _CLI_DEFAULTS["min_border_brightness"]:
         overrides["min_border_brightness"] = args.min_border_brightness
     if args.mode == "edge_contour":
         overrides.setdefault("use_edge_contour", True)
@@ -288,7 +295,9 @@ def run_detection(args: argparse.Namespace) -> int:
         autocontrast=args.autocontrast,
         unsharp=args.unsharp,
     )
-    preprocessed_img: Image.Image = pre_result.get("enhanced") or pre_result.get("gray") or map_crop
+    _enhanced = pre_result.get("enhanced")
+    _gray = pre_result.get("gray")
+    preprocessed_img: Image.Image = _enhanced if _enhanced is not None else (_gray if _gray is not None else map_crop)
     edges = pre_result.get("edges")
     report["timings"]["preprocess"] = time.perf_counter() - t_pre0
 
