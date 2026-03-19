@@ -15,7 +15,7 @@ preprocess_for_detection(img, ...) -> dict
 from __future__ import annotations
 
 from .bbox import BboxConfig, BboxResult, find_map_bbox
-from .microgrid import MicrogridConfig, MicrogridResult, detect_microgrid
+from .microgrid import MicrogridConfig, MicrogridResult, detect_microgrid, search_microgrid_first
 from .preprocess import preprocess_for_detection
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "BboxConfig",
     "BboxResult",
     "detect_microgrid",
+    "search_microgrid_first",
     "MicrogridConfig",
     "MicrogridResult",
     "preprocess_for_detection",
