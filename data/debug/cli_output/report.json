@@ -1,0 +1,69 @@
+{
+  "image": "/tmp/tmpf329pm0c.png",
+  "mode": "edge_contour",
+  "bbox": [
+    19,
+    19,
+    162,
+    162
+  ],
+  "bbox_method_used": "dark_box",
+  "bbox_seed": [
+    19,
+    19,
+    162,
+    162
+  ],
+  "bbox_refined": [
+    19,
+    19,
+    162,
+    162
+  ],
+  "microgrid": {
+    "module_step_x": 64,
+    "module_step_y": 64,
+    "micro_step_x": 6,
+    "micro_step_y": 6,
+    "offset_x": 0,
+    "offset_y": 0,
+    "periodicity_score_x": 0.0,
+    "periodicity_score_y": 0.0
+  },
+  "bbox_log": [
+    "edge_contour: found 0 raw contours (cv2)",
+    "edge_contour (cv2): no contours passed all filters",
+    "dark_box frac=0.90 side=162 mean=30.0",
+    "dark_box frac=0.85 side=153 mean=30.0",
+    "dark_box frac=0.80 side=144 mean=30.0",
+    "dark_box frac=0.75 side=135 mean=30.0",
+    "dark_box frac=0.70 side=125 mean=30.0",
+    "dark_box frac=0.65 side=117 mean=30.0",
+    "dark_box frac=0.60 side=108 mean=30.0",
+    "dark_box frac=0.55 side=99 mean=30.0",
+    "dark_box frac=0.50 side=90 mean=30.0",
+    "dark_box frac=0.45 side=81 mean=30.0",
+    "dark_box frac=0.40 side=72 mean=30.0",
+    "dark_box frac=0.35 side=62 mean=30.0",
+    "dark_box frac=0.30 side=54 mean=30.0",
+    "dark_box frac=0.25 side=45 mean=30.0",
+    "dark_box frac=0.20 side=36 mean=30.0",
+    "dark_box accepted: mean=30.0 < 65",
+    "  refine seed: (19,19,162\u00d7162)",
+    "  refine deltas: left=0 right=0 top=0 bot=0  \u2192 (19,19,162\u00d7162)"
+  ],
+  "microgrid_log": [
+    "module_period x=64(score=0.0) y=64(score=0.0)",
+    "micro_period  x=28(score=0.0) y=28(score=0.0)",
+    "resolved step x=64 micro_x=6 offset_x=0",
+    "resolved step y=64 micro_y=6 offset_y=0"
+  ],
+  "timings": {
+    "bbox": 0.00472244699994917,
+    "preprocess": 0.0006326770001123805,
+    "microgrid": 0.0030563580000944057,
+    "total": 0.027308494999942923
+  },
+  "ok": true,
+  "error": ""
+}
